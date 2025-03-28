@@ -31,6 +31,7 @@ criterion = { version = "0.3", optional = true }
 thread_local = "1.1.8"
 cfg-if = "1.0.0"
 borsh = { workspace = true, optional = true }
+serde = { version = "1.0", optional = true, default-features = false, features = ["derive"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
 io-uring = "0.6.4"
@@ -62,3 +63,4 @@ fuzz = []
 borsh = ["dep:borsh", "nomt-core/borsh"]
 blake3-hasher = ["nomt-core/blake3-hasher"]
 sha2-hasher = ["nomt-core/sha2-hasher"]
+serde = ["dep:serde"]
