@@ -72,6 +72,7 @@ struct Shared {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Witness {
     /// Various paths down the trie used as part of this witness.
     pub path_proofs: Vec<WitnessedPath>,
@@ -85,6 +86,7 @@ pub struct Witness {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedOperations {
     /// Read operations.
     pub reads: Vec<WitnessedRead>,
@@ -97,6 +99,7 @@ pub struct WitnessedOperations {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedPath {
     /// Proof of a query path along the trie.
     pub inner: PathProof,
@@ -109,6 +112,7 @@ pub struct WitnessedPath {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedRead {
     /// The key of the read value.
     pub key: KeyPath,
@@ -123,6 +127,7 @@ pub struct WitnessedRead {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedWrite {
     /// The key of the written value.
     pub key: KeyPath,
@@ -204,6 +209,10 @@ impl KeyReadWrite {
 
 /// The root of the Merkle Trie.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "borsh",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct Root([u8; 32]);
 
 impl Root {
@@ -241,6 +250,18 @@ impl std::fmt::Debug for Root {
         }
         write!(f, ")")?;
         Ok(())
+    }
+}
+
+impl AsRef<[u8]> for Root {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<[u8; 32]> for Root {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
     }
 }
 
