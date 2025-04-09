@@ -72,6 +72,7 @@ struct Shared {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Witness {
     /// Various paths down the trie used as part of this witness.
     pub path_proofs: Vec<WitnessedPath>,
@@ -85,6 +86,7 @@ pub struct Witness {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedOperations {
     /// Read operations.
     pub reads: Vec<WitnessedRead>,
@@ -97,6 +99,7 @@ pub struct WitnessedOperations {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedPath {
     /// Proof of a query path along the trie.
     pub inner: PathProof,
@@ -109,6 +112,7 @@ pub struct WitnessedPath {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedRead {
     /// The key of the read value.
     pub key: KeyPath,
@@ -123,6 +127,7 @@ pub struct WitnessedRead {
     feature = "borsh",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WitnessedWrite {
     /// The key of the written value.
     pub key: KeyPath,
@@ -570,6 +575,11 @@ impl<T: HashAlgorithm> Session<T> {
             return Ok(value_change.as_option().map(|v| v.to_vec()));
         }
         self.store.load_value(path)
+    }
+
+    /// Prev root
+    pub fn prev_root(&self) -> Root {
+        self.prev_root
     }
 
     /// Signals that the given key is going to be written to. Relevant only if rollback is enabled.
