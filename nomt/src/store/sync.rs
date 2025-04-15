@@ -38,25 +38,35 @@ impl Sync {
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
+        println!("syncing 1");
         let sync_seqn = self.sync_seqn + 1;
 
         let mut bitbox_sync = bitbox.sync();
+        println!("syncing 2");
         let mut beatree_sync = beatree.sync();
+        println!("syncing 3");
         let mut rollback_sync = rollback.map(|rollback| rollback.sync());
+        println!("syncing 4");
 
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
+        println!("syncing 5");
         beatree_sync.begin_sync(value_tx);
+        println!("syncing 6");
         let (rollback_start_live, rollback_end_live) = match rollback_sync {
             Some(ref mut rollback) => rollback.begin_sync(),
             None => (0, 0),
         };
+        println!("syncing 7");
 
         bitbox_sync.wait_pre_meta()?;
+        println!("syncing 8");
         let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
+        println!("syncing 9");
 
         if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-wal)")
         }
+        println!("syncing 10");
 
         let new_meta = Meta {
             magic: meta::MAGIC,
@@ -71,7 +81,9 @@ impl Sync {
             rollback_start_live,
             rollback_end_live,
         };
+        println!("syncing 11");
         Meta::write(&shared.io_pool.page_pool(), &shared.meta_fd, &new_meta)?;
+        println!("syncing 12");
         self.sync_seqn += 1;
 
         if let Some(PanicOnSyncMode::PostMeta) = self.panic_on_sync {
@@ -81,13 +93,17 @@ impl Sync {
         if let Some(ref mut rollback) = rollback_sync {
             rollback.post_meta();
         }
+        println!("syncing 13");
 
         bitbox_sync.post_meta(shared.io_pool.make_handle())?;
+        println!("syncing 14");
         beatree_sync.post_meta();
+        println!("syncing 15");
 
         if let Some(ref rollback) = rollback_sync {
             rollback.wait_post_meta()?;
         }
+        println!("syncing done");
         Ok(())
     }
 }
