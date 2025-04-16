@@ -278,6 +278,8 @@ impl Store {
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
+        println!("committing value transaction");
+        println!("taking sync lock");
         let mut sync = self.sync.lock();
 
         if self
@@ -288,6 +290,7 @@ impl Store {
             anyhow::bail!("Store is poisoned due to prior error");
         }
 
+        println!("syncing");
         if let Err(e) = sync.sync(
             &self.shared,
             value_tx,

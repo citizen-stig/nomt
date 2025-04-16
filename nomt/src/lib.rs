@@ -727,7 +727,9 @@ impl FinishedSession {
     /// The changeset may be invalidated if another competing session, overlay, or rollback was
     /// committed.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> Result<(), anyhow::Error> {
+        println!("taking global guard:");
         let _write_guard = self.take_global_guard.then(|| nomt.access_lock.write());
+        println!("global guard taken, taking shared lock");
 
         {
             let mut shared = nomt.shared.lock();
@@ -741,11 +743,14 @@ impl FinishedSession {
             shared.root = Root(self.merkle_output.root);
             shared.last_commit_marker = None;
         }
+        println!("shared lock released");
 
         if let Some(rollback_delta) = self.rollback_delta {
             // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
+            println!("committing rollback delta");
             let rollback = nomt.store.rollback().unwrap();
             rollback.commit(rollback_delta)?;
+            println!("rollback delta committed");
         }
 
         nomt.store.commit(
