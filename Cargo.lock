@@ -2186,6 +2186,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "commit-batch",
+ "hex",
  "nomt-core",
 ]
 

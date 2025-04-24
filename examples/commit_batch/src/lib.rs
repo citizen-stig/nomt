@@ -38,6 +38,8 @@ impl NomtDB {
         //
         // `read` will immediately return the value present in the database
         let value = session.read(key_path_1)?;
+        let value_2 = Some(vec![2, 2, 2]);
+        let value_3 = Some(vec![3, 3, 3]);
 
         // We are going to perform writes on both key-paths, so we have NOMT warm up the on-disk
         // data for both.
@@ -50,8 +52,11 @@ impl NomtDB {
         // To commit the batch to the backend we need to collect every
         // performed actions into a vector where items are ordered by the key_path
         let mut actual_access: Vec<_> = vec![
-            (key_path_1, KeyReadWrite::ReadThenWrite(value.clone(), None)),
-            (key_path_2, KeyReadWrite::Write(value)),
+            // (
+            //     key_path_1,
+            //     KeyReadWrite::ReadThenWrite(value.clone(), value_2),
+            // ),
+            // (key_path_2, KeyReadWrite::Write(value_3)),
         ];
         actual_access.sort_by_key(|(k, _)| *k);
 

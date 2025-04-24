@@ -10,7 +10,8 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nomt-core = { path = "../../core"  }
-commit-batch = { path = "../commit_batch"  }
+nomt-core = { path = "../../core" }
+commit-batch = { path = "../commit_batch" }
 anyhow = "1.0.81"
 blake3 = "1.5.1"
+hex = { version = "0.4.3" }
