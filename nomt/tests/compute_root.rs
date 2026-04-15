@@ -176,10 +176,7 @@ depth_sweep_test!(depth_sweep_d255, 255);
 fn overwrite_and_empty_value() {
     let k_a = key_diverging_at(16, false);
     let k_b = key_diverging_at(16, true);
-    let prev = vec![
-        (k_a, Some(vec![1, 2, 3])),
-        (k_b, Some(vec![9, 9, 9])),
-    ];
+    let prev = vec![(k_a, Some(vec![1, 2, 3])), (k_b, Some(vec![9, 9, 9]))];
     let accesses = vec![
         (k_a, KeyReadWrite::Write(Some(vec![1, 2, 3]))), // idempotent same-value overwrite
         (k_b, KeyReadWrite::Write(Some(vec![]))),        // empty value, distinct from None
@@ -191,10 +188,7 @@ fn overwrite_and_empty_value() {
 fn delete_collapses_internal_to_leaf() {
     let k_a = key_diverging_at(16, false);
     let k_b = key_diverging_at(16, true);
-    let prev = vec![
-        (k_a, Some(vec![0xAA])),
-        (k_b, Some(vec![0xBB])),
-    ];
+    let prev = vec![(k_a, Some(vec![0xAA])), (k_b, Some(vec![0xBB]))];
     let accesses = vec![(k_b, KeyReadWrite::Write(None))];
     test_root_match_with_inputs("delete_collapses_internal_to_leaf", prev, &accesses);
 }
