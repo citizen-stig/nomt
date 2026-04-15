@@ -68,7 +68,7 @@ fn test_root_match_with_inputs(
     let mut t = Test::new(name);
     {
         for (key_path, write) in prev_data {
-            t.write(key_path, write.clone());
+            t.write(key_path, write);
         }
         t.commit();
     }
@@ -99,7 +99,7 @@ fn test_root_match_with_inputs(
     inner.sort_by(|a, b| a.terminal.path().cmp(b.terminal.path()));
     let multi_proof = MultiProof::from_path_proofs(inner);
 
-    let verifier_root = run_verifier(multi_proof, accesses, prev_root.into_inner()).unwrap();
+    let verifier_root = run_verifier(multi_proof, accesses, prev_root.into_inner());
 
     assert_eq!(
         prover_root.into_inner(),
@@ -112,7 +112,7 @@ fn run_verifier(
     multi_proof: MultiProof,
     accesses: &[(KeyPath, KeyReadWrite)],
     prev_root: Node,
-) -> anyhow::Result<Node> {
+) -> Node {
     let verified = verify_multi_proof::<Blake3Hasher>(&multi_proof, prev_root)
         .expect("multiproof must verify against the prior root");
 
@@ -128,30 +128,35 @@ fn run_verifier(
     updates.sort_by(|a, b| a.0.cmp(&b.0));
 
     verify_multi_proof_update::<Blake3Hasher>(&verified, updates)
-        .map_err(|e| anyhow::anyhow!("Failed to verify_multi_proof_update: {e:?}"))
+        .expect("verify_multi_proof_update must succeed")
 }
 
 fn run_depth_sweep_case(name: &str, depth: usize) {
     let k0 = key_diverging_at(depth, false);
     let k1 = key_diverging_at(depth, true);
-
-    // Sanity: the pair differs in exactly one bit, at MSB-position `depth`.
-    let xor: Vec<u8> = k0.iter().zip(k1.iter()).map(|(a, b)| a ^ b).collect();
-    let set_bits: u32 = xor.iter().map(|b| b.count_ones()).sum();
-    assert_eq!(set_bits, 1, "keys should differ in exactly one bit");
-    let diverging_byte = depth / 8;
-    let diverging_mask = 1u8 << (7 - (depth % 8));
-    assert_eq!(
-        xor[diverging_byte], diverging_mask,
-        "divergence should be at MSB-position {depth}"
-    );
-
     let (k_lo, k_hi) = if k0 < k1 { (k0, k1) } else { (k1, k0) };
     let accesses = vec![
         (k_lo, KeyReadWrite::Write(Some(vec![0xAA]))),
         (k_hi, KeyReadWrite::Write(Some(vec![0xBB]))),
     ];
     test_root_match_with_inputs(name, Vec::new(), &accesses);
+}
+
+#[test]
+fn key_diverging_at_differs_by_one_bit() {
+    for depth in [0usize, 1, 7, 8, 15, 16, 127, 255] {
+        let k0 = key_diverging_at(depth, false);
+        let k1 = key_diverging_at(depth, true);
+        let xor: Vec<u8> = k0.iter().zip(k1.iter()).map(|(a, b)| a ^ b).collect();
+        let set_bits: u32 = xor.iter().map(|b| b.count_ones()).sum();
+        assert_eq!(set_bits, 1, "depth {depth}: keys should differ in one bit");
+        let diverging_byte = depth / 8;
+        let diverging_mask = 1u8 << (7 - (depth % 8));
+        assert_eq!(
+            xor[diverging_byte], diverging_mask,
+            "depth {depth}: divergence should be at MSB-position"
+        );
+    }
 }
 
 macro_rules! depth_sweep_test {
@@ -178,8 +183,8 @@ fn overwrite_and_empty_value() {
     let k_b = key_diverging_at(16, true);
     let prev = vec![(k_a, Some(vec![1, 2, 3])), (k_b, Some(vec![9, 9, 9]))];
     let accesses = vec![
-        (k_a, KeyReadWrite::Write(Some(vec![1, 2, 3]))), // idempotent same-value overwrite
-        (k_b, KeyReadWrite::Write(Some(vec![]))),        // empty value, distinct from None
+        (k_a, KeyReadWrite::Write(Some(vec![1, 2, 3]))),
+        (k_b, KeyReadWrite::Write(Some(vec![]))),
     ];
     test_root_match_with_inputs("overwrite_and_empty_value", prev, &accesses);
 }
@@ -204,7 +209,7 @@ fn delete_last_key_to_terminator() {
 #[test]
 fn delete_nonexistent_key() {
     let k_a = key_diverging_at(8, false);
-    let k_b = key_diverging_at(8, true); // not in prev_data
+    let k_b = key_diverging_at(8, true);
     let prev = vec![(k_a, Some(vec![0xAA]))];
     let accesses = vec![(k_b, KeyReadWrite::Write(None))];
     test_root_match_with_inputs("delete_nonexistent_key", prev, &accesses);
@@ -287,11 +292,8 @@ fn delete_all_keys_to_terminator() {
 
 #[test]
 fn insert_splits_existing_leaf() {
-    // prev: two leaves diverging at bit 0 (left: [0;32], right: [0x80;..]).
     let k_left = key_diverging_at(0, false);
     let k_right = key_diverging_at(0, true);
-    // new key shares bits 0..6 with k_left and diverges at bit 7, forcing the
-    // existing left leaf to be demoted under a new internal at bit 7.
     let k_new = key_diverging_at(7, true);
     let prev = vec![(k_left, Some(vec![0x11])), (k_right, Some(vec![0x22]))];
     let accesses = vec![(k_new, KeyReadWrite::Write(Some(vec![0xEE])))];
@@ -301,7 +303,7 @@ fn insert_splits_existing_leaf() {
 #[test]
 fn read_then_write_missing_key() {
     let k_other = key_diverging_at(8, false);
-    let k_missing = key_diverging_at(8, true); // not in prev_data
+    let k_missing = key_diverging_at(8, true);
     let prev = vec![(k_other, Some(vec![0xCC]))];
     let accesses = vec![(
         k_missing,
@@ -316,21 +318,18 @@ fn many_keys_round_trip() {
         .map(|i| (account_path(i), Some(vec![i as u8, 0x01])))
         .collect();
     let mut accesses: Vec<(KeyPath, KeyReadWrite)> = Vec::new();
-    // Insert 16 new keys.
     for i in 32..48 {
         accesses.push((
             account_path(i),
             KeyReadWrite::Write(Some(vec![i as u8, 0x02])),
         ));
     }
-    // Overwrite 8 existing keys.
     for i in 0..8 {
         accesses.push((
             account_path(i),
             KeyReadWrite::Write(Some(vec![i as u8, 0x03])),
         ));
     }
-    // Delete 8 existing keys.
     for i in 8..16 {
         accesses.push((account_path(i), KeyReadWrite::Write(None)));
     }
