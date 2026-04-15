@@ -24,6 +24,37 @@ pub fn account_path(id: u64) -> KeyPath {
     path
 }
 
+/// Build a 32-byte key whose first `bit_depth` bits are 0 and whose bit at
+/// MSB-position `bit_depth` is 1 iff `right`. Remaining bits are 0.
+/// Two keys built with the same `bit_depth` and opposite `right` flags
+/// differ in exactly one bit, at MSB-position `bit_depth`.
+#[allow(dead_code)]
+pub fn key_diverging_at(bit_depth: usize, right: bool) -> KeyPath {
+    assert!(bit_depth < 256);
+    let mut key = KeyPath::default();
+    if right {
+        let byte = bit_depth / 8;
+        let bit_in_byte = 7 - (bit_depth % 8);
+        key[byte] = 1 << bit_in_byte;
+    }
+    key
+}
+
+/// Build a key from an explicit MSB-first bit prefix; remaining bits are 0.
+#[allow(dead_code)]
+pub fn key_with_prefix(bits: &[bool]) -> KeyPath {
+    assert!(bits.len() <= 256);
+    let mut key = KeyPath::default();
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            let byte = i / 8;
+            let bit_in_byte = 7 - (i % 8);
+            key[byte] |= 1 << bit_in_byte;
+        }
+    }
+    key
+}
+
 #[allow(dead_code)]
 pub fn expected_root(accounts: u64) -> Node {
     let mut ops = (0..accounts)
