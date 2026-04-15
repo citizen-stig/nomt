@@ -255,6 +255,68 @@ fn cluster_asymmetric_tree() {
 }
 
 #[test]
+fn insert_empty_value_new_key() {
+    let k_other = key_diverging_at(8, false);
+    let k_new = key_diverging_at(8, true);
+    let prev = vec![(k_other, Some(vec![0xCC]))];
+    let accesses = vec![(k_new, KeyReadWrite::Write(Some(vec![])))];
+    test_root_match_with_inputs("insert_empty_value_new_key", prev, &accesses);
+}
+
+#[test]
+fn read_then_delete() {
+    let k_a = key_diverging_at(16, false);
+    let k_b = key_diverging_at(16, true);
+    let v_b = vec![0xBB];
+    let prev = vec![(k_a, Some(vec![0xAA])), (k_b, Some(v_b.clone()))];
+    let accesses = vec![(k_b, KeyReadWrite::ReadThenWrite(Some(v_b), None))];
+    test_root_match_with_inputs("read_then_delete", prev, &accesses);
+}
+
+#[test]
+fn delete_all_keys_to_terminator() {
+    let k0 = key_diverging_at(0, true);
+    let k1 = key_diverging_at(8, true);
+    let k2 = key_diverging_at(64, true);
+    let prev = vec![
+        (k0, Some(vec![0xA0])),
+        (k1, Some(vec![0xA1])),
+        (k2, Some(vec![0xA2])),
+    ];
+    let accesses = vec![
+        (k0, KeyReadWrite::Write(None)),
+        (k1, KeyReadWrite::Write(None)),
+        (k2, KeyReadWrite::Write(None)),
+    ];
+    test_root_match_with_inputs("delete_all_keys_to_terminator", prev, &accesses);
+}
+
+#[test]
+fn insert_splits_existing_leaf() {
+    // prev: two leaves diverging at bit 0 (left: [0;32], right: [0x80;..]).
+    let k_left = key_diverging_at(0, false);
+    let k_right = key_diverging_at(0, true);
+    // new key shares bits 0..6 with k_left and diverges at bit 7, forcing the
+    // existing left leaf to be demoted under a new internal at bit 7.
+    let k_new = key_diverging_at(7, true);
+    let prev = vec![(k_left, Some(vec![0x11])), (k_right, Some(vec![0x22]))];
+    let accesses = vec![(k_new, KeyReadWrite::Write(Some(vec![0xEE])))];
+    test_root_match_with_inputs("insert_splits_existing_leaf", prev, &accesses);
+}
+
+#[test]
+fn read_then_write_missing_key() {
+    let k_other = key_diverging_at(8, false);
+    let k_missing = key_diverging_at(8, true); // not in prev_data
+    let prev = vec![(k_other, Some(vec![0xCC]))];
+    let accesses = vec![(
+        k_missing,
+        KeyReadWrite::ReadThenWrite(None, Some(vec![0xEE])),
+    )];
+    test_root_match_with_inputs("read_then_write_missing_key", prev, &accesses);
+}
+
+#[test]
 fn same_key_writes_in_batch() {
     let k = key_diverging_at(24, false);
     let k_other = key_diverging_at(24, true);
