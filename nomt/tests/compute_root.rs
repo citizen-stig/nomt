@@ -1,10 +1,11 @@
 mod common;
 
 use common::Test;
-use nomt::{hasher::Blake3Hasher, trie::NodeKind, KeyReadWrite};
+use nomt::{hasher::Blake3Hasher, trie::NodeKind, KeyReadWrite, Value};
 use nomt_core::hasher::ValueHasher;
 use nomt_core::proof::{verify_multi_proof, verify_multi_proof_update, MultiProof};
 use nomt_core::trie::{KeyPath, Node, ValueHash};
+use std::path::Path;
 
 #[test]
 fn root_on_empty_db() {
@@ -56,11 +57,21 @@ fn simple_roots_match() {
         ([1; 32], KeyReadWrite::Write(Some(vec![1, 2, 3]))),
     ];
 
-    test_root_match_with_inputs(&accesses);
+    test_root_match_with_inputs("simple_roots_match", Vec::new(), &accesses);
 }
 
-fn test_root_match_with_inputs(accesses: &[(KeyPath, KeyReadWrite)]) {
-    let mut t = Test::new("compute_root_internal");
+fn test_root_match_with_inputs(
+    name: impl AsRef<Path>,
+    prev_data: Vec<(KeyPath, Option<Value>)>,
+    accesses: &[(KeyPath, KeyReadWrite)],
+) {
+    let mut t = Test::new(name);
+    {
+        for (key_path, write) in prev_data {
+            t.write(key_path, write.clone());
+        }
+        t.commit();
+    }
     let prev_root = t.root();
     for (key_path, operation) in accesses {
         match operation {
