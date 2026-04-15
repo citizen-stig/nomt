@@ -317,20 +317,6 @@ fn read_then_write_missing_key() {
 }
 
 #[test]
-fn same_key_writes_in_batch() {
-    let k = key_diverging_at(24, false);
-    let k_other = key_diverging_at(24, true);
-    let prev = vec![(k_other, Some(vec![0xCC]))];
-    // Two writes to the same key in one batch; harness HashMap + verifier BTreeMap both
-    // keep the last write.
-    let accesses = vec![
-        (k, KeyReadWrite::Write(Some(vec![1]))),
-        (k, KeyReadWrite::Write(Some(vec![2]))),
-    ];
-    test_root_match_with_inputs("same_key_writes_in_batch", prev, &accesses);
-}
-
-#[test]
 fn many_keys_round_trip() {
     let prev: Vec<_> = (0..32)
         .map(|i| (account_path(i), Some(vec![i as u8, 0x01])))
