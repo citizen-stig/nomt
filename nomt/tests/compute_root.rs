@@ -1,10 +1,11 @@
 mod common;
 
-use common::{account_path, key_diverging_at, Test};
+use common::{account_path, fresh_test_name, key_diverging_at, SessionAccessCase, Test};
 use nomt::{hasher::Blake3Hasher, trie::NodeKind, KeyReadWrite, Value};
 use nomt_core::hasher::ValueHasher;
 use nomt_core::proof::{verify_multi_proof, verify_multi_proof_update, MultiProof};
 use nomt_core::trie::{KeyPath, Node, ValueHash};
+use quickcheck::QuickCheck;
 use std::path::Path;
 
 #[test]
@@ -377,4 +378,21 @@ fn many_keys_deletes_only() {
         .map(|i| (account_path(i), KeyReadWrite::Write(None)))
         .collect();
     test_root_match_with_inputs("many_keys_deletes_only", prev, &accesses);
+}
+
+#[test]
+fn property_generated_roots_match() {
+    fn property(case: SessionAccessCase) -> bool {
+        let prev_data = case.prev_data_with_options();
+        test_root_match_with_inputs(
+            fresh_test_name("compute_root_prop"),
+            prev_data,
+            &case.accesses,
+        );
+        true
+    }
+
+    QuickCheck::new()
+        .tests(24)
+        .quickcheck(property as fn(SessionAccessCase) -> bool);
 }

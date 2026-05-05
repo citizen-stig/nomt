@@ -1,7 +1,8 @@
 mod common;
 
-use common::Test;
+use common::{fresh_test_name, SessionAccessCase, Test};
 use nomt::{hasher::Blake3Hasher, proof, trie::LeafData};
+use quickcheck::QuickCheck;
 
 #[test]
 fn produced_witness_validity() {
@@ -171,4 +172,86 @@ fn test_verify_update_with_identical_paths() {
     // Try to verify the update. We expect an error due to identical paths, because that violates
     // the requirement of ascending keys.
     verify_update::<Blake3Hasher>(root.into_inner(), &updates).unwrap_err();
+}
+
+#[test]
+fn property_generated_witnesses_verify() {
+    fn property(case: SessionAccessCase) -> bool {
+        let mut t = Test::new(fresh_test_name("witness_prop"));
+
+        for (key, value) in &case.prev_data {
+            t.write(*key, Some(value.clone()));
+        }
+        let (prev_root, _) = t.commit();
+
+        for (key, access) in &case.accesses {
+            match access {
+                nomt::KeyReadWrite::Read(expected) => {
+                    assert_eq!(t.read(*key), *expected);
+                }
+                nomt::KeyReadWrite::Write(value) => t.write(*key, value.clone()),
+                nomt::KeyReadWrite::ReadThenWrite(expected, value) => {
+                    assert_eq!(t.read(*key), *expected);
+                    t.write(*key, value.clone());
+                }
+            }
+        }
+
+        let (new_root, witness) = t.commit();
+
+        let mut updates = Vec::new();
+        for (i, witnessed_path) in witness.path_proofs.iter().enumerate() {
+            let verified = witnessed_path
+                .inner
+                .verify::<Blake3Hasher>(&witnessed_path.path.path(), prev_root.into_inner())
+                .unwrap();
+
+            for read in witness
+                .operations
+                .reads
+                .iter()
+                .skip_while(|r| r.path_index != i)
+                .take_while(|r| r.path_index == i)
+            {
+                match read.value {
+                    None => assert!(verified.confirm_nonexistence(&read.key).unwrap()),
+                    Some(ref value_hash) => {
+                        let leaf = LeafData {
+                            key_path: read.key,
+                            value_hash: *value_hash,
+                        };
+                        assert!(verified.confirm_value(&leaf).unwrap());
+                    }
+                }
+            }
+
+            let mut write_ops = Vec::new();
+            for write in witness
+                .operations
+                .writes
+                .iter()
+                .skip_while(|w| w.path_index != i)
+                .take_while(|w| w.path_index == i)
+            {
+                write_ops.push((write.key, write.value.clone()));
+            }
+
+            if !write_ops.is_empty() {
+                updates.push(proof::PathUpdate {
+                    inner: verified,
+                    ops: write_ops,
+                });
+            }
+        }
+
+        assert_eq!(
+            proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
+            new_root.into_inner(),
+        );
+        true
+    }
+
+    QuickCheck::new()
+        .tests(16)
+        .quickcheck(property as fn(SessionAccessCase) -> bool);
 }
