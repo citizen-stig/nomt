@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "core",
     "nomt",
+    "nomt-test-utils",
     "fuzz",
     "torture",
     "examples/*",

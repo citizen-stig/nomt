@@ -1092,6 +1092,7 @@ dependencies = [
  "loom",
  "lru",
  "nomt-core",
+ "nomt-test-utils",
  "parking_lot",
  "quickcheck",
  "rand",
@@ -1114,6 +1115,8 @@ dependencies = [
  "borsh",
  "digest",
  "hex",
+ "nomt-test-utils",
+ "quickcheck",
  "ruint",
  "serde",
  "sha2",
@@ -1128,6 +1131,16 @@ dependencies = [
  "libfuzzer-sys",
  "nomt",
  "tempfile",
+]
+
+[[package]]
+name = "nomt-test-utils"
+version = "0.1.0"
+dependencies = [
+ "nomt-core",
+ "quickcheck",
+ "rand",
+ "rand_pcg",
 ]
 
 [[package]]

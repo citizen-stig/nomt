@@ -48,6 +48,7 @@ lazy_static.workspace = true
 hex.workspace = true
 quickcheck.workspace = true
 blake3.workspace = true
+nomt-test-utils = { path = "../nomt-test-utils" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

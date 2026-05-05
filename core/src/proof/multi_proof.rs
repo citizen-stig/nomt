@@ -909,11 +909,12 @@ mod tests {
     use crate::{
         hasher::{Blake3Hasher, NodeHasher},
         proof::{PathProof, PathProofTerminal},
-        trie::{InternalData, KeyPath, LeafData, ValueHash, TERMINATOR},
+        trie::{InternalData, LeafData, ValueHash, TERMINATOR},
         trie_pos::TriePosition,
         update::build_trie,
     };
     use bitvec::prelude::*;
+    use nomt_test_utils::key_with_prefix;
 
     #[test]
     pub fn test_multiproof_creation_single_path_proof() {
@@ -1891,26 +1892,8 @@ mod tests {
         // 1. Define paths with prefix relationship
         let bits_prefix = bitvec![u8, Msb0; 1, 0, 1, 0]; // length 4
         let bits_longer = bitvec![u8, Msb0; 1, 0, 1, 0, 1, 1]; // length 6 (prefix + 2 bits)
-
-        // Helper to create KeyPath from BitVec (simplified, assumes short paths)
-        let keypath_from_bits = |bits: &BitSlice<u8, Msb0>| -> KeyPath {
-            let mut kp = KeyPath::default();
-
-            for (i, bit) in bits.iter().by_vals().enumerate() {
-                if i >= 256 {
-                    break;
-                }
-
-                if bit {
-                    kp[i / 8] |= 1 << (7 - (i % 8));
-                }
-            }
-
-            kp
-        };
-
-        let kp_prefix = keypath_from_bits(&bits_prefix);
-        let kp_longer = keypath_from_bits(&bits_longer);
+        let kp_prefix = key_with_prefix(bits_prefix.iter().by_vals());
+        let kp_longer = key_with_prefix(bits_longer.iter().by_vals());
 
         // 2. Create corresponding LeafData and Nodes
         let leaf_prefix = LeafData {
@@ -1962,13 +1945,13 @@ mod tests {
 
         key_op1_bits.push(false); // e.g., 10100 (falls under 1010)
 
-        let key_op1 = keypath_from_bits(&key_op1_bits);
+        let key_op1 = key_with_prefix(key_op1_bits.iter().by_vals());
 
         let mut key_op2_bits = bits_longer.clone();
 
         key_op2_bits.push(true); // e.g., 1010111 (falls under 101011)
 
-        let key_op2 = keypath_from_bits(&key_op2_bits);
+        let key_op2 = key_with_prefix(key_op2_bits.iter().by_vals());
 
         let ops = vec![
             (key_op1, Some(ValueHash::default())), // Op under prefix path
