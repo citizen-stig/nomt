@@ -13,7 +13,7 @@ use std::{
 pub fn account_path(id: u64) -> KeyPath {
     // KeyPaths must be uniformly distributed, but we don't want to spend time on a good hash. So
     // the next best option is to use a PRNG seeded with the id.
-    use rand::{RngCore as _, SeedableRng as _};
+    use rand::{Rng as _, SeedableRng as _};
     let mut seed = [0; 16];
     seed[0..8].copy_from_slice(&id.to_le_bytes());
     let mut rng = rand_pcg::Lcg64Xsh32::from_seed(seed);

@@ -3,7 +3,7 @@ use super::{
     swarm::{self, SwarmFeatures},
     ResourceExhaustion,
 };
-use rand::{Rng, RngCore};
+use rand::prelude::*;
 use std::sync::{Arc, Mutex};
 
 /// Percentage of the assigned space to the workload that will be
@@ -165,14 +165,14 @@ impl WorkloadConfiguration {
             preallocate_ht: false,
             prepopulate_page_cache: false,
             bitbox_seed,
-            avg_commit_size: rng.gen_range(1..=(MAX_COMMIT_SIZE / 2)),
-            avg_value_len: rng.gen_range(1..=(MAX_VALUE_LEN / 2)),
-            avg_overflow_value_len: rng.gen_range(MAX_VALUE_LEN..=(MAX_OVERFLOW_VALUE_LEN / 2)),
-            commit_concurrency: rng.gen_range(1..=MAX_COMMIT_CONCURRENCY),
-            io_workers: rng.gen_range(1..=MAX_IO_WORKERS),
-            page_cache_size: rng.gen_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
-            leaf_cache_size: rng.gen_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
-            page_cache_upper_levels: rng.gen_range(0..=MAX_PAGE_CACHE_UPPER_LEVELS),
+            avg_commit_size: rng.random_range(1..=(MAX_COMMIT_SIZE / 2)),
+            avg_value_len: rng.random_range(1..=(MAX_VALUE_LEN / 2)),
+            avg_overflow_value_len: rng.random_range(MAX_VALUE_LEN..=(MAX_OVERFLOW_VALUE_LEN / 2)),
+            commit_concurrency: rng.random_range(1..=MAX_COMMIT_CONCURRENCY),
+            io_workers: rng.random_range(1..=MAX_IO_WORKERS),
+            page_cache_size: rng.random_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
+            leaf_cache_size: rng.random_range(1..=MAX_IN_MEMORY_CACHE_SIZE),
+            page_cache_upper_levels: rng.random_range(0..=MAX_PAGE_CACHE_UPPER_LEVELS),
             // To avoid reaching Bucket Exhaustion, we limit the number of iterations
             // with the worst case scenario of every iteration adding `avg_commit_size` new keys.
             hashtable_buckets: 0,
@@ -296,35 +296,35 @@ impl WorkloadConfiguration {
     pub fn apply_swarm_feature(&mut self, rng: &mut rand_pcg::Pcg64, feature: SwarmFeatures) {
         match feature {
             SwarmFeatures::TrickfsENOSPC => {
-                self.enospc_on = rng.gen_range(0.01..=1.00);
-                self.enospc_off = rng.gen_range(0.01..=1.00);
+                self.enospc_on = rng.random_range(0.01..=1.00);
+                self.enospc_off = rng.random_range(0.01..=1.00);
             }
             SwarmFeatures::TrickfsLatencyInjection => {
-                self.latency_on = rng.gen_range(0.01..=1.00);
-                self.latency_off = rng.gen_range(0.01..=1.00);
+                self.latency_on = rng.random_range(0.01..=1.00);
+                self.latency_off = rng.random_range(0.01..=1.00);
             }
             SwarmFeatures::EnsureChangeset => self.ensure_changeset = true,
             SwarmFeatures::SampleSnapshot => self.sample_snapshot = true,
             SwarmFeatures::WarmUp => self.warm_up = true,
             SwarmFeatures::PreallocateHt => self.preallocate_ht = true,
             SwarmFeatures::Read => {
-                self.reads = rng.gen_range(0.01..1.00);
-                self.read_concurrency = rng.gen_range(1..=64);
-                self.read_existing_key = rng.gen_range(0.01..1.00);
+                self.reads = rng.random_range(0.01..1.00);
+                self.read_concurrency = rng.random_range(1..=64);
+                self.read_existing_key = rng.random_range(0.01..1.00);
             }
             SwarmFeatures::Rollback => {
-                self.rollback = rng.gen_range(0.01..1.00);
+                self.rollback = rng.random_range(0.01..1.00);
                 // During scheduling of rollbacks the lower bound is 1
                 // thus max must be at least 2 to avoid creating an empty range.
-                self.max_rollback_commits = rng.gen_range(2..100);
+                self.max_rollback_commits = rng.random_range(2..100);
             }
-            SwarmFeatures::RollbackCrash => self.rollback_crash = rng.gen_range(0.01..1.00),
-            SwarmFeatures::CommitCrash => self.commit_crash = rng.gen_range(0.01..1.00),
+            SwarmFeatures::RollbackCrash => self.rollback_crash = rng.random_range(0.01..1.00),
+            SwarmFeatures::CommitCrash => self.commit_crash = rng.random_range(0.01..1.00),
             SwarmFeatures::PrepopulatePageCache => self.prepopulate_page_cache = true,
-            SwarmFeatures::NewKeys => self.new_key = rng.gen_range(0.01..=1.00),
-            SwarmFeatures::DeleteKeys => self.delete_key = rng.gen_range(0.01..=1.00),
-            SwarmFeatures::UpdateKeys => self.update_key = rng.gen_range(0.01..=1.00),
-            SwarmFeatures::OverflowValues => self.overflow = rng.gen_range(0.01..=1.00),
+            SwarmFeatures::NewKeys => self.new_key = rng.random_range(0.01..=1.00),
+            SwarmFeatures::DeleteKeys => self.delete_key = rng.random_range(0.01..=1.00),
+            SwarmFeatures::UpdateKeys => self.update_key = rng.random_range(0.01..=1.00),
+            SwarmFeatures::OverflowValues => self.overflow = rng.random_range(0.01..=1.00),
         }
     }
 }

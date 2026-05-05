@@ -1,6 +1,6 @@
 use anyhow::Result;
 use imbl::OrdMap;
-use rand::{distributions::WeightedIndex, prelude::*};
+use rand::{distr::weighted::WeightedIndex, prelude::*};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -305,7 +305,7 @@ impl Workload {
 
         if self.trick_handle.is_some() {
             if self.enabled_enospc {
-                let should_turn_off = self.rng.gen_bool(self.config.enospc_off);
+                let should_turn_off = self.rng.random_bool(self.config.enospc_off);
                 if should_turn_off {
                     info!("unsetting ENOSPC");
                     self.enabled_enospc = false;
@@ -315,7 +315,7 @@ impl Workload {
                         .set_trigger_enospc(false);
                 }
             } else {
-                let should_turn_on = self.rng.gen_bool(self.config.enospc_on);
+                let should_turn_on = self.rng.random_bool(self.config.enospc_on);
                 if should_turn_on {
                     info!("setting ENOSPC");
                     self.enabled_enospc = true;
@@ -324,7 +324,7 @@ impl Workload {
             }
 
             if self.enabled_latency {
-                let should_turn_off = self.rng.gen_bool(self.config.latency_off);
+                let should_turn_off = self.rng.random_bool(self.config.latency_off);
                 if should_turn_off {
                     info!("unsetting latency injector");
                     self.enabled_latency = false;
@@ -334,7 +334,7 @@ impl Workload {
                         .set_trigger_latency_injector(false);
                 }
             } else {
-                let should_turn_on = self.rng.gen_bool(self.config.latency_on);
+                let should_turn_on = self.rng.random_bool(self.config.latency_on);
                 if should_turn_on {
                     info!("setting latency injector");
                     self.enabled_latency = true;
@@ -348,12 +348,12 @@ impl Workload {
 
         // Do not schedule new rollbacks if they are already scheduled.
         let is_rollback_scheduled = self.scheduled_rollback.is_some();
-        if !is_rollback_scheduled && self.rng.gen_bool(self.config.rollback) {
-            let should_crash = self.rng.gen_bool(self.config.rollback_crash);
+        if !is_rollback_scheduled && self.rng.random_bool(self.config.rollback) {
+            let should_crash = self.rng.random_bool(self.config.rollback_crash);
             self.schedule_rollback(should_crash).await?
         }
 
-        let should_crash = self.rng.gen_bool(self.config.commit_crash);
+        let should_crash = self.rng.random_bool(self.config.commit_crash);
         self.exercise_commit(should_crash).await?;
 
         Ok(())
@@ -500,7 +500,7 @@ impl Workload {
 
     async fn schedule_rollback(&mut self, should_crash: bool) -> anyhow::Result<()> {
         let n_commits_to_rollback =
-            self.rng.gen_range(1..self.config.max_rollback_commits) as usize;
+            self.rng.random_range(1..self.config.max_rollback_commits) as usize;
 
         let last_snapshot = &self.committed;
         let rollback_sync_seqn = last_snapshot.sync_seqn + n_commits_to_rollback as u32;
@@ -879,7 +879,7 @@ impl Workload {
         let mut snapshot = self.committed.clone();
         snapshot.sync_seqn += 1;
 
-        let size = self.rng.gen_range(0..self.config.avg_commit_size * 2);
+        let size = self.rng.random_range(0..self.config.avg_commit_size * 2);
 
         let reads_size = (size as f64 * self.config.reads) as usize;
         let changeset_size = size - reads_size;
@@ -931,7 +931,7 @@ impl Workload {
         let threshold = self.committed.state.len();
         while reads.len() < size {
             self.rng.fill_bytes(&mut key);
-            if reads.len() < threshold && self.rng.gen_bool(self.config.read_existing_key) {
+            if reads.len() < threshold && self.rng.random_bool(self.config.read_existing_key) {
                 if let Some((next_key, Some(_))) = self.committed.state.get_next(&key) {
                     key.copy_from_slice(next_key);
                 }
@@ -1055,11 +1055,11 @@ impl Workload {
     fn gen_value(&mut self) -> Vec<u8> {
         // MAX_LEAF_VALUE_SIZE is 1332,
         // thus every value size bigger than this will create an overflow value.
-        let len = if self.rng.gen_bool(self.config.overflow) {
+        let len = if self.rng.random_bool(self.config.overflow) {
             self.rng
-                .gen_range(MAX_VALUE_LEN..(self.config.avg_overflow_value_len) * 2)
+                .random_range(MAX_VALUE_LEN..(self.config.avg_overflow_value_len) * 2)
         } else {
-            self.rng.gen_range(1..(self.config.avg_value_len) * 2)
+            self.rng.random_range(1..(self.config.avg_value_len) * 2)
         };
         let mut value = vec![0; len];
         self.rng.fill_bytes(&mut value);

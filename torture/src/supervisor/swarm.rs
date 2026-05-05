@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 pub enum SwarmFeatures {
     /// Trigger on and off trickfs to return ENOSPC.
@@ -59,7 +59,7 @@ pub fn new_features_set(rng: &mut rand_pcg::Pcg64) -> Vec<SwarmFeatures> {
 
     // Features removal mechanism -> coin tossing for almost every feature.
     for idx in (0..features.len()).rev() {
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             features.remove(idx);
         }
     }
@@ -71,10 +71,10 @@ pub fn new_features_set(rng: &mut rand_pcg::Pcg64) -> Vec<SwarmFeatures> {
     //
     // The probability of using Trickfs is 10% (= p*p + 2 * (p * (1-p))).
     let p = 0.052;
-    if rng.gen_bool(p) {
+    if rng.random_bool(p) {
         features.push(SwarmFeatures::TrickfsLatencyInjection);
     }
-    if rng.gen_bool(p) {
+    if rng.random_bool(p) {
         features.push(SwarmFeatures::TrickfsENOSPC);
     }
 
