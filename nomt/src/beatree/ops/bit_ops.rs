@@ -284,7 +284,7 @@ pub fn bitwise_memcpy(
 pub mod benches {
     use crate::beatree::benches::get_key_pair;
     use criterion::{BenchmarkId, Criterion};
-    use rand::RngCore;
+    use rand::Rng as _;
 
     pub fn separate_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group("separate");
@@ -308,7 +308,7 @@ pub mod benches {
             };
 
             for prefix_bits in [0, 1, 4, 7, 8, 9, 12, 15, 18] {
-                let mut rand = rand::thread_rng();
+                let mut rand = rand::rng();
                 // 50 to extract multiples of 8 bytes for the separator
                 let mut key = [0; 50];
                 rand.fill_bytes(&mut key);

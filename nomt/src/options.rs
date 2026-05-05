@@ -35,9 +35,7 @@ pub struct Options {
 impl Options {
     /// Create a new `Options` instance with the default values and a random bitbox seed.
     pub fn new() -> Self {
-        use rand::Rng as _;
-        let mut bitbox_seed = [0u8; 16];
-        rand::rngs::OsRng.fill(&mut bitbox_seed);
+        let bitbox_seed: [u8; 16] = rand::random();
 
         Self {
             path: PathBuf::from("nomt_db"),
