@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     let handle = trickfs::spawn_trick(args.mountpoint, 0).unwrap();
     waitline();
-    drop(handle);
+    handle.unmount_and_join();
 
     Ok(())
 }
