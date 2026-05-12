@@ -631,7 +631,6 @@ impl CommonSiblings {
                 next_bisection.start_depth + 1,
                 next_bisection.common_siblings.end,
                 &proof.siblings,
-                false,
             );
             self.bisection_stack.push(next_bisection.clone());
         }
@@ -641,7 +640,6 @@ impl CommonSiblings {
             next_terminal.depth - terminal_n + 1,
             next_terminal.unique_siblings.end,
             &proof.siblings,
-            true,
         );
         self.terminal_index += 1;
     }
@@ -660,15 +658,9 @@ impl CommonSiblings {
         }
     }
 
-    fn extend(&mut self, start_depth: usize, end: usize, siblings: &[Node], reverse: bool) {
-        if reverse {
-            for (i, sibling) in siblings[self.taken_siblings..end].iter().rev().enumerate() {
-                self.stack.push((start_depth + i, *sibling))
-            }
-        } else {
-            for (i, sibling) in siblings[self.taken_siblings..end].iter().enumerate() {
-                self.stack.push((start_depth + i, *sibling))
-            }
+    fn extend(&mut self, start_depth: usize, end: usize, siblings: &[Node]) {
+        for (i, sibling) in siblings[self.taken_siblings..end].iter().enumerate() {
+            self.stack.push((start_depth + i, *sibling))
         }
 
         self.taken_siblings = end;
@@ -1500,6 +1492,99 @@ mod tests {
         ];
 
         let expected_root = build_trie::<Blake3Hasher>(0, final_state, |_| {});
+
+        assert_eq!(
+            verify_update::<Blake3Hasher>(&verified, ops).unwrap(),
+            expected_root,
+        );
+    }
+
+    #[test]
+    fn verify_update_terminal_with_multi_unique_siblings() {
+        // Regression test: exercises `CommonSiblings::extend` for a terminal
+        // whose unique-sibling tail has length >= 2 with at least one
+        // non-TERMINATOR entry. Earlier `verify_update` unit tests all had
+        // terminal_n <= 1, masking the sibling-depth swap that affected
+        // `verify_multi_proof_update`.
+        //
+        //                       root
+        //                     /      \
+        //                    i1       l_other
+        //                   /  \
+        //                  i2   T
+        //                 /  \
+        //                i3   T
+        //               /  \
+        //              i4   T
+        //             /  \
+        //            i5   T
+        //           /  \
+        //          i6   T
+        //         /  \
+        //        i7   T
+        //       /  \
+        //  l_alone  l_neighbor
+
+        let mut k_alone = [0u8; 32];
+        k_alone[0] = 0b00000000;
+        let mut k_neighbor = [0u8; 32];
+        k_neighbor[0] = 0b00000001;
+        let mut k_other = [0u8; 32];
+        k_other[0] = 0b10000000;
+
+        let make_leaf = |key_path, value_byte| {
+            let leaf_data = LeafData {
+                key_path,
+                value_hash: [value_byte; 32],
+            };
+            let hash = Blake3Hasher::hash_leaf(&leaf_data);
+            (leaf_data, hash)
+        };
+        let internal_hash =
+            |left, right| Blake3Hasher::hash_internal(&InternalData { left, right });
+
+        let (l_alone, h_alone) = make_leaf(k_alone, 0xAA);
+        let (l_neighbor, h_neighbor) = make_leaf(k_neighbor, 0xBB);
+        let (l_other, h_other) = make_leaf(k_other, 0xCC);
+
+        let i7 = internal_hash(h_alone, h_neighbor);
+        let i6 = internal_hash(i7, TERMINATOR);
+        let i5 = internal_hash(i6, TERMINATOR);
+        let i4 = internal_hash(i5, TERMINATOR);
+        let i3 = internal_hash(i4, TERMINATOR);
+        let i2 = internal_hash(i3, TERMINATOR);
+        let i1 = internal_hash(i2, TERMINATOR);
+        let root = internal_hash(i1, h_other);
+
+        // Witness for k_alone: 8 siblings at depths 1..=8 (ascending by depth).
+        let path_proof_alone = PathProof {
+            terminal: PathProofTerminal::Leaf(l_alone.clone()),
+            siblings: vec![
+                h_other, TERMINATOR, TERMINATOR, TERMINATOR, TERMINATOR, TERMINATOR, TERMINATOR,
+                h_neighbor,
+            ],
+        };
+        let path_proof_other = PathProof {
+            terminal: PathProofTerminal::Leaf(l_other.clone()),
+            siblings: vec![i1],
+        };
+
+        let multi_proof =
+            MultiProof::from_path_proofs(vec![path_proof_alone, path_proof_other]);
+
+        let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
+
+        // Update k_alone with a new value.
+        let new_value: ValueHash = [0xDD; 32];
+        let ops = vec![(k_alone, Some(new_value))];
+
+        // Expected post-update root: rebuild the trie with k_alone's new value.
+        let new_state = vec![
+            (k_alone, new_value),
+            (k_neighbor, l_neighbor.value_hash),
+            (k_other, l_other.value_hash),
+        ];
+        let expected_root = build_trie::<Blake3Hasher>(0, new_state, |_| {});
 
         assert_eq!(
             verify_update::<Blake3Hasher>(&verified, ops).unwrap(),
