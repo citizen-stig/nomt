@@ -40,6 +40,22 @@ pub fn fresh_test_name(prefix: &str) -> String {
 }
 
 #[allow(dead_code)]
+pub fn apply_accesses(t: &mut Test, accesses: &[(KeyPath, KeyReadWrite)]) {
+    for (key, access) in accesses {
+        match access {
+            KeyReadWrite::Read(expected) => {
+                assert_eq!(t.read(*key), *expected);
+            }
+            KeyReadWrite::Write(value) => t.write(*key, value.clone()),
+            KeyReadWrite::ReadThenWrite(expected, value) => {
+                assert_eq!(t.read(*key), *expected);
+                t.write(*key, value.clone());
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub fn arbitrary_small_value(g: &mut Gen) -> Value {
     let len = usize::arbitrary(g) % 9;
     let mut value = Vec::with_capacity(len);

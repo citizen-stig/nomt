@@ -1,6 +1,8 @@
 mod common;
 
-use common::{account_path, fresh_test_name, key_diverging_at, SessionAccessCase, Test};
+use common::{
+    account_path, apply_accesses, fresh_test_name, key_diverging_at, SessionAccessCase, Test,
+};
 use nomt::{hasher::Blake3Hasher, trie::NodeKind, KeyReadWrite, Value};
 use nomt_core::hasher::ValueHasher;
 use nomt_core::proof::{verify_multi_proof, verify_multi_proof_update, MultiProof};
@@ -394,5 +396,89 @@ fn property_generated_roots_match() {
 
     QuickCheck::new()
         .tests(24)
+        .quickcheck(property as fn(SessionAccessCase) -> bool);
+}
+
+#[test]
+fn property_post_commit_state_matches_reference() {
+    fn property(case: SessionAccessCase) -> bool {
+        let mut t = Test::new(fresh_test_name("state_oracle_prop"));
+
+        for (key, value) in &case.prev_data {
+            t.write(*key, Some(value.clone()));
+        }
+        t.commit();
+
+        apply_accesses(&mut t, &case.accesses);
+        let (root, _) = t.commit();
+
+        let expected_state = case.expected_final_state();
+
+        for (key, expected_value) in &expected_state {
+            assert_eq!(
+                t.read(*key).as_ref(),
+                Some(expected_value),
+                "post-commit read mismatch for present key"
+            );
+        }
+
+        for (key, _) in &case.accesses {
+            if !expected_state.contains_key(key) {
+                assert_eq!(
+                    t.read(*key),
+                    None,
+                    "expected key to be absent after committed deletes"
+                );
+            }
+        }
+
+        let mut ops = expected_state
+            .iter()
+            .map(|(k, v)| (*k, Blake3Hasher::hash_value(v)))
+            .collect::<Vec<_>>();
+        ops.sort_by_key(|(k, _)| *k);
+        let reference_root = nomt_core::update::build_trie::<Blake3Hasher>(0, ops, |_| {});
+
+        assert_eq!(
+            root.into_inner(),
+            reference_root,
+            "Nomt root disagrees with build_trie oracle"
+        );
+
+        true
+    }
+
+    QuickCheck::new()
+        .tests(16)
+        .quickcheck(property as fn(SessionAccessCase) -> bool);
+}
+
+#[test]
+fn property_root_invariant_under_reopen() {
+    fn property(case: SessionAccessCase) -> bool {
+        let name = fresh_test_name("reopen_root_prop");
+
+        let pre_close_root = {
+            let mut t = Test::new(&name);
+            for (key, value) in &case.prev_data {
+                t.write(*key, Some(value.clone()));
+            }
+            t.commit();
+            apply_accesses(&mut t, &case.accesses);
+            t.commit().0
+        };
+
+        let reopened = Test::new_with_params(&name, 1, 64_000, None, false);
+        assert_eq!(
+            reopened.root().into_inner(),
+            pre_close_root.into_inner(),
+            "root drifted across close/reopen"
+        );
+
+        true
+    }
+
+    QuickCheck::new()
+        .tests(16)
         .quickcheck(property as fn(SessionAccessCase) -> bool);
 }
