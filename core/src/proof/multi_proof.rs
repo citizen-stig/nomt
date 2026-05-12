@@ -1569,8 +1569,7 @@ mod tests {
             siblings: vec![i1],
         };
 
-        let multi_proof =
-            MultiProof::from_path_proofs(vec![path_proof_alone, path_proof_other]);
+        let multi_proof = MultiProof::from_path_proofs(vec![path_proof_alone, path_proof_other]);
 
         let verified = verify::<Blake3Hasher>(&multi_proof, root).unwrap();
 
