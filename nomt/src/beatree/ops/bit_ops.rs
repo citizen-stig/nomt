@@ -445,11 +445,10 @@ mod tests {
     }
 
     fn arbitrary_bit_len(g: &mut Gen, max: usize) -> usize {
-        let interesting = EDGE_BIT_LENS
-            .iter()
-            .copied()
-            .filter(|len| *len <= max)
-            .collect::<Vec<_>>();
+        // EDGE_BIT_LENS is sorted ascending, so a partition point gives the slice of
+        // entries `<= max` without allocating.
+        let valid_count = EDGE_BIT_LENS.partition_point(|len| *len <= max);
+        let interesting = &EDGE_BIT_LENS[..valid_count];
 
         if bool::arbitrary(g) {
             interesting[usize::arbitrary(g) % interesting.len()]
