@@ -1,6 +1,6 @@
 use nomt_core::trie::KeyPath;
 use quickcheck::{empty_shrinker, single_shrinker, Arbitrary, Gen};
-use rand::{RngCore as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _};
 use rand_pcg::Lcg64Xsh32;
 use std::collections::BTreeSet;
 
