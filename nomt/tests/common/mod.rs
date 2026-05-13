@@ -188,7 +188,10 @@ impl Arbitrary for SessionAccessCase {
         let allow_missing_read_then_write = !prev_state.is_empty();
         for key in missing_keys {
             if bool::arbitrary(g) {
-                accesses.push((key, arbitrary_missing_access(g, allow_missing_read_then_write)));
+                accesses.push((
+                    key,
+                    arbitrary_missing_access(g, allow_missing_read_then_write),
+                ));
             }
         }
 
