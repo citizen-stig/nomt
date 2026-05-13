@@ -28,16 +28,10 @@ impl TestKeyPath {
 
     pub fn with_prefix_bits(bits: impl IntoIterator<Item = bool>, seed: u64) -> Self {
         let mut key = seeded_key(seed);
-        let mut prefix_len = 0;
 
         for (i, bit) in bits.into_iter().enumerate() {
             assert!(i < 256);
             set_bit(&mut key, i, bit);
-            prefix_len = i + 1;
-        }
-
-        if prefix_len == 256 {
-            return Self(key);
         }
 
         Self(key)
@@ -141,6 +135,8 @@ pub struct SharedPrefixCluster {
 }
 
 impl SharedPrefixCluster {
+    /// `count` must satisfy `2 <= count <= max_cluster_members(prefix_bits.len())`,
+    /// otherwise the post-dedup length assertion will fire.
     pub fn from_prefix_bits(bits: impl IntoIterator<Item = bool>, count: usize, seed: u64) -> Self {
         let prefix_bits = collect_bits(bits);
         let prefix_len_bits = prefix_bits.len();

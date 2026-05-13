@@ -1,8 +1,18 @@
 mod common;
 
-use common::{fresh_test_name, SessionAccessCase, Test};
+use common::{apply_accesses, fresh_test_name, SessionAccessCase, Test};
 use nomt::{hasher::Blake3Hasher, proof, trie::LeafData};
 use quickcheck::QuickCheck;
+
+fn sort_updates_by_path(updates: &mut [proof::PathUpdate]) {
+    // Witness path proofs may be emitted in worker order rather than trie path order.
+    updates.sort_by(|a, b| {
+        a.inner
+            .path()
+            .partial_cmp(b.inner.path())
+            .expect("verified witness paths should be comparable")
+    });
+}
 
 #[test]
 fn produced_witness_validity() {
@@ -87,6 +97,7 @@ fn produced_witness_validity() {
             });
         }
     }
+    sort_updates_by_path(&mut updates);
 
     assert_eq!(
         proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),
@@ -184,18 +195,7 @@ fn property_generated_witnesses_verify() {
         }
         let (prev_root, _) = t.commit();
 
-        for (key, access) in &case.accesses {
-            match access {
-                nomt::KeyReadWrite::Read(expected) => {
-                    assert_eq!(t.read(*key), *expected);
-                }
-                nomt::KeyReadWrite::Write(value) => t.write(*key, value.clone()),
-                nomt::KeyReadWrite::ReadThenWrite(expected, value) => {
-                    assert_eq!(t.read(*key), *expected);
-                    t.write(*key, value.clone());
-                }
-            }
-        }
+        apply_accesses(&mut t, &case.accesses);
 
         let (new_root, witness) = t.commit();
 
@@ -243,6 +243,7 @@ fn property_generated_witnesses_verify() {
                 });
             }
         }
+        sort_updates_by_path(&mut updates);
 
         assert_eq!(
             proof::verify_update::<Blake3Hasher>(prev_root.into_inner(), &updates).unwrap(),

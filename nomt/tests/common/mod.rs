@@ -15,16 +15,8 @@ use std::{
 
 static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
-pub fn account_path(id: u64) -> KeyPath {
-    nomt_test_utils::account_path(id)
-}
+pub use nomt_test_utils::{account_path, key_diverging_at};
 
-#[allow(dead_code)]
-pub fn key_diverging_at(bit_depth: usize, right: bool) -> KeyPath {
-    nomt_test_utils::key_diverging_at(bit_depth, right)
-}
-
-#[allow(dead_code)]
 pub fn expected_root(accounts: u64) -> Node {
     let mut ops = (0..accounts)
         .map(account_path)
@@ -40,6 +32,28 @@ pub fn fresh_test_name(prefix: &str) -> String {
 }
 
 #[allow(dead_code)]
+fn fill_missing_keys(g: &mut Gen, excluded: &mut BTreeSet<KeyPath>, target: usize) -> Vec<KeyPath> {
+    let mut out = Vec::with_capacity(target);
+    let attempt_budget = target.saturating_mul(8) + 8;
+    let mut attempts = 0;
+    while out.len() < target && attempts < attempt_budget {
+        let key = TestKeyPath::arbitrary(g).into_inner();
+        if excluded.insert(key) {
+            out.push(key);
+        }
+        attempts += 1;
+    }
+    let mut fill_seed = 0u64;
+    while out.len() < target {
+        let key = account_path(fill_seed);
+        if excluded.insert(key) {
+            out.push(key);
+        }
+        fill_seed = fill_seed.wrapping_add(1);
+    }
+    out
+}
+
 pub fn apply_accesses(t: &mut Test, accesses: &[(KeyPath, KeyReadWrite)]) {
     for (key, access) in accesses {
         match access {
@@ -85,9 +99,12 @@ pub fn arbitrary_interesting_keys(g: &mut Gen, max_len: usize) -> Vec<KeyPath> {
         keys.insert(pair.right);
     }
 
-    if target_len >= 2 && bool::arbitrary(g) {
+    if keys.len() < target_len && target_len >= 2 && bool::arbitrary(g) {
         let cluster = SharedPrefixCluster::arbitrary(g);
         for member in cluster.members {
+            if keys.len() >= target_len {
+                break;
+            }
             keys.insert(member);
         }
     }
@@ -96,9 +113,7 @@ pub fn arbitrary_interesting_keys(g: &mut Gen, max_len: usize) -> Vec<KeyPath> {
         keys.insert(TestKeyPath::arbitrary(g).into_inner());
     }
 
-    let mut keys = keys.into_iter().collect::<Vec<_>>();
-    keys.truncate(target_len);
-    keys
+    keys.into_iter().collect()
 }
 
 #[allow(dead_code)]
@@ -162,13 +177,7 @@ impl Arbitrary for SessionAccessCase {
 
         let mut all_keys = prev_state.keys().copied().collect::<BTreeSet<_>>();
         let missing_target = 1 + (usize::arbitrary(g) % 4);
-        let mut missing_keys = Vec::with_capacity(missing_target);
-        while missing_keys.len() < missing_target {
-            let key = TestKeyPath::arbitrary(g).into_inner();
-            if all_keys.insert(key) {
-                missing_keys.push(key);
-            }
-        }
+        let missing_keys = fill_missing_keys(g, &mut all_keys, missing_target);
 
         let mut accesses = Vec::new();
         for (key, value) in &prev_state {
@@ -176,10 +185,10 @@ impl Arbitrary for SessionAccessCase {
                 accesses.push((*key, arbitrary_present_access(g, value.clone())));
             }
         }
-        let allow_missing_delete = !prev_state.is_empty();
+        let allow_missing_read_then_write = !prev_state.is_empty();
         for key in missing_keys {
             if bool::arbitrary(g) {
-                accesses.push((key, arbitrary_missing_access(g, allow_missing_delete)));
+                accesses.push((key, arbitrary_missing_access(g, allow_missing_read_then_write)));
             }
         }
 
@@ -231,13 +240,7 @@ impl Arbitrary for ProofCase {
 
         let mut used_keys = state_keys.into_iter().collect::<BTreeSet<_>>();
         let missing_target = 1 + (usize::arbitrary(g) % 4);
-        let mut missing_samples = Vec::with_capacity(missing_target);
-        while missing_samples.len() < missing_target {
-            let key = TestKeyPath::arbitrary(g).into_inner();
-            if used_keys.insert(key) {
-                missing_samples.push(key);
-            }
-        }
+        let mut missing_samples = fill_missing_keys(g, &mut used_keys, missing_target);
 
         shuffle(&mut present_samples, g);
         shuffle(&mut missing_samples, g);
@@ -258,8 +261,8 @@ fn arbitrary_present_access(g: &mut Gen, prior: Value) -> KeyReadWrite {
     }
 }
 
-fn arbitrary_missing_access(g: &mut Gen, allow_delete: bool) -> KeyReadWrite {
-    match if allow_delete {
+fn arbitrary_missing_access(g: &mut Gen, allow_read_then_write: bool) -> KeyReadWrite {
+    match if allow_read_then_write {
         u8::arbitrary(g) % 3
     } else {
         u8::arbitrary(g) % 2
