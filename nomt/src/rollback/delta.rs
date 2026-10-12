@@ -24,6 +24,13 @@ impl Delta {
     ///
     /// Returns the number of bytes written.
     pub(super) fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.encode_into(&mut buf);
+        buf
+    }
+
+    pub(super) fn encode_into(&self, buf: &mut Vec<u8>) {
+        buf.clear();
         // The serialization format has the following layout.
         //
         // The keys are split into two groups and written as separate arrays. Those groups are:
@@ -50,7 +57,7 @@ impl Delta {
         }
 
         let to_erase_len = to_erase.len() as u32;
-        let mut buf = Vec::with_capacity(4 + 32 * to_erase.len());
+        buf.reserve(4 + 32 * to_erase.len());
         buf.extend_from_slice(&to_erase_len.to_le_bytes());
         for key in to_erase {
             buf.extend_from_slice(&key[..]);
@@ -64,8 +71,6 @@ impl Delta {
             buf.extend_from_slice(&value_len.to_le_bytes());
             buf.extend_from_slice(value);
         }
-
-        buf
     }
 
     /// Decodes the delta from a buffer.

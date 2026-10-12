@@ -100,9 +100,15 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                 // system call would have returned in case of success,
                 // and in case of error completion_event.result() will contain -errno
                 let io_uring_res = completion_event.result();
-                let syscall_result = if io_uring_res >= 0 { io_uring_res } else { -1 };
+                let io_result = if io_uring_res >= 0 {
+                    command.kind.get_result(io_uring_res as isize)
+                } else if io_uring_res == -libc::EINTR {
+                    IoKindResult::Retry
+                } else {
+                    IoKindResult::Err
+                };
 
-                let result = match command.kind.get_result(syscall_result as isize) {
+                let result = match io_result {
                     IoKindResult::Ok => Ok(()),
                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
                     IoKindResult::Retry => {
@@ -208,7 +214,8 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()
         }
-        IoKind::WriteRaw(fd, page_index, ref page) => {
+        IoKind::WriteShared(fd, page_index, ref page) => {
+            let page: &[u8; PAGE_SIZE] = page.as_ref().as_ref();
             opcode::Write::new(types::Fd(fd), page.as_ptr(), PAGE_SIZE as u32)
                 .offset(page_index * PAGE_SIZE as u64)
                 .build()

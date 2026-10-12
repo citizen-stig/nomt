@@ -1,10 +1,15 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use nomt_core::page_id::PageId;
 
 use super::{
     meta::{self, Meta},
     DirtyPage, Shared,
 };
-use crate::{beatree, bitbox, options::PanicOnSyncMode, page_cache::PageCache, rollback};
+use crate::{
+    beatree, bitbox, options::PanicOnSyncMode, page_cache::PageCache, rollback,
+    task::unwrap_task_result,
+};
 
 pub struct Sync {
     pub(crate) sync_seqn: u32,
@@ -35,6 +40,7 @@ impl Sync {
         bitbox: bitbox::DB,
         beatree: beatree::Tree,
         rollback: Option<rollback::Rollback>,
+        rollback_delta: impl IntoIterator<Item = rollback::Delta>,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
     ) -> anyhow::Result<()> {
@@ -42,17 +48,41 @@ impl Sync {
 
         let mut bitbox_sync = bitbox.sync();
         let mut beatree_sync = beatree.sync();
-        let mut rollback_sync = rollback.map(|rollback| rollback.sync());
+        let mut rollback_sync = rollback.as_ref().map(|rollback| rollback.sync());
 
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
-        beatree_sync.begin_sync(value_tx);
+        // All Store commits run under NOMT's exclusive access guard.
+        beatree_sync.begin_sync_exclusive(value_tx);
+        // Tree preparation may run concurrently with rollback persistence. All must
+        // complete successfully before the manifest can reference their new state.
+        let mut deltas = rollback_delta.into_iter();
+        let rollback_result =
+            catch_unwind(AssertUnwindSafe(|| match (deltas.next(), deltas.next()) {
+                (None, _) => Ok(()),
+                (Some(delta), None) => rollback
+                    .as_ref()
+                    .expect("rollback delta without log")
+                    .commit(delta),
+                (Some(first), Some(second)) => {
+                    let mut batch = vec![first, second];
+                    batch.extend(deltas);
+                    rollback
+                        .as_ref()
+                        .expect("rollback delta without log")
+                        .commit_batch(batch)
+                }
+            }));
+        let bitbox_result = catch_unwind(AssertUnwindSafe(|| bitbox_sync.wait_pre_meta()));
+        let beatree_result = catch_unwind(AssertUnwindSafe(|| beatree_sync.wait_pre_meta()));
+        // Join both preparations before propagating any error or panic.
+        unwrap_task_result(rollback_result)?;
+        unwrap_task_result(bitbox_result)?;
+        let beatree_meta_wd = unwrap_task_result(beatree_result)?;
+
         let (rollback_start_live, rollback_end_live) = match rollback_sync {
             Some(ref mut rollback) => rollback.begin_sync(),
             None => (0, 0),
         };
-
-        bitbox_sync.wait_pre_meta()?;
-        let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
 
         if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-wal)")
@@ -82,12 +112,22 @@ impl Sync {
             rollback.post_meta();
         }
 
-        bitbox_sync.post_meta(shared.io_pool.make_handle())?;
-        beatree_sync.post_meta();
-
-        if let Some(ref rollback) = rollback_sync {
-            rollback.wait_post_meta()?;
-        }
+        let beatree_post_meta = beatree_sync.post_meta();
+        let bitbox_result = catch_unwind(AssertUnwindSafe(|| {
+            bitbox_sync.post_meta(shared.io_pool.make_handle())
+        }));
+        let beatree_result = catch_unwind(AssertUnwindSafe(|| {
+            crate::task::join_task(&beatree_post_meta)
+        }));
+        // Cleanup must finish even when a sibling unwinds.
+        let rollback_result = catch_unwind(AssertUnwindSafe(|| {
+            rollback_sync
+                .as_ref()
+                .map_or(Ok(()), |rollback| rollback.wait_post_meta())
+        }));
+        unwrap_task_result(bitbox_result)?;
+        unwrap_task_result(beatree_result);
+        unwrap_task_result(rollback_result)?;
         Ok(())
     }
 }

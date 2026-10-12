@@ -51,6 +51,21 @@ struct Shared {
     _db_dir_fd: Arc<File>,
 }
 
+/// Persistence may leave in-memory state unusable on either error or unwind.
+struct CommitPoisonGuard<'a> {
+    poisoned: &'a AtomicBool,
+    complete: bool,
+}
+
+impl Drop for CommitPoisonGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.poisoned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
@@ -269,15 +284,13 @@ impl Store {
         ValueTransaction { batch: Vec::new() }
     }
 
-    /// Atomically apply the given transaction.
-    ///
-    /// After this function returns, accessor methods such as [`Self::load_page`] will return the
-    /// updated values.
-    pub fn commit(
+    /// Persist rollback alongside tree preparation, before publishing the manifest.
+    pub(crate) fn commit_with_rollback(
         &self,
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
+        rollback_delta: impl IntoIterator<Item = crate::rollback::Delta>,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -289,20 +302,21 @@ impl Store {
             anyhow::bail!("Store is poisoned due to prior error");
         }
 
-        if let Err(e) = sync.sync(
+        let mut poison_guard = CommitPoisonGuard {
+            poisoned: &self.shared.poisoned,
+            complete: false,
+        };
+        sync.sync(
             &self.shared,
             value_tx,
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            rollback_delta,
             page_cache,
             updated_pages,
-        ) {
-            self.shared
-                .poisoned
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            return Err(e);
-        }
+        )?;
+        poison_guard.complete = true;
         Ok(())
     }
 }
@@ -399,6 +413,16 @@ pub enum BucketInfo {
     /// Without this shared state, it would be possible to lose track of the allocated bucket index
     /// from one overlay to the next.
     FreshOrDependent(SharedMaybeBucketIndex),
+}
+
+impl BucketInfo {
+    pub(crate) fn allocated(&self) -> Option<BucketIndex> {
+        match self {
+            Self::Known(bucket) => Some(*bucket),
+            Self::FreshOrDependent(bucket) => bucket.get(),
+            Self::FreshWithNoDependents => None,
+        }
+    }
 }
 
 /// A dirty page to be written to the store.

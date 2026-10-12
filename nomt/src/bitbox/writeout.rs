@@ -15,7 +15,8 @@ use std::{
 use crate::io::{FatPage, IoCommand, IoHandle, IoKind};
 
 pub(super) fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> std::io::Result<()> {
-    wal_fd.set_len(0)?;
+    // Recovery and successful post-meta cleanup already leave the WAL empty.
+    // A failed commit poisons the store and cannot start another writeout.
     wal_fd.seek(SeekFrom::Start(0))?;
     wal_fd.write_all(wal_blob)?;
     wal_fd.sync_all()?;
@@ -52,12 +53,17 @@ pub(super) fn write_ht(
         sent += 1;
     }
 
+    let mut write_result = Ok(());
     while sent > 0 {
-        io_handle.recv().unwrap();
+        // Drain every submitted write, retaining the first error. The caller must
+        // preserve the WAL if any page failed to reach the hash table.
+        write_result = write_result.and(io_handle.recv().unwrap().result);
         sent -= 1;
     }
+    write_result?;
 
-    ht_fd.sync_all()?;
+    // Persist contents and metadata needed to retrieve them, without timestamp updates.
+    ht_fd.sync_data()?;
 
     Ok(())
 }

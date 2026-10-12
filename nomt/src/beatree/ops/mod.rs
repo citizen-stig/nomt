@@ -21,6 +21,7 @@ mod update;
 
 pub use reconstruction::reconstruct;
 pub use update::update;
+pub(crate) use update::update_values;
 
 /// Do a partial lookup of the key in the beatree.
 ///
