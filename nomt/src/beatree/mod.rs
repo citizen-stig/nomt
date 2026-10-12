@@ -216,6 +216,16 @@ impl Tree {
         shared: &Arc<RwLock<Shared>>,
         changeset: impl IntoIterator<Item = (Key, ValueChange)>,
     ) {
+        let mut changeset: Vec<_> = changeset.into_iter().collect();
+        sort_value_changes(&mut changeset, false);
+        // Fill adjacent persistent-tree nodes more densely than monotonic insertion.
+        // Stable local ordering preserves the final value for duplicate keys.
+        const INSERT_BLOCK: usize = 64;
+        if changeset.len() >= INSERT_BLOCK * 2 {
+            for block in changeset.chunks_mut(INSERT_BLOCK) {
+                block.sort_by(|a, b| b.0.cmp(&a.0));
+            }
+        }
         let mut inner = shared.write();
         let staging = &mut inner.primary_staging;
         for (key, value) in changeset {
@@ -233,6 +243,7 @@ impl Tree {
         sync: &Sync,
         shared: &Arc<RwLock<Shared>>,
         read_transaction_counter: &ReadTransactionCounter,
+        exclusive_changeset: Option<Vec<(Key, ValueChange)>>,
     ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
         // Take the shared lock. Briefly.
         let staged_changeset;
@@ -279,7 +290,15 @@ impl Tree {
             // of the most recent sync and therefore references no logically free pages.
 
             let mut shared = shared.write();
-            staged_changeset = shared.take_staged_changeset();
+            staged_changeset = if exclusive_changeset.is_some() {
+                // The enclosing NOMT write guard excludes new readers. Keep the
+                // regular persistent staging path intact for non-exclusive users.
+                assert!(shared.primary_staging.is_empty());
+                assert!(shared.secondary_staging.is_none());
+                None
+            } else {
+                Some(shared.take_staged_changeset())
+            };
             bbn_index = shared.bbn_index.clone();
             page_pool = shared.page_pool.clone();
             leaf_cache = shared.leaf_cache.clone();
@@ -306,8 +325,15 @@ impl Tree {
             //   available and reachable from the old index
             // + All necessary page writes will be issued to the store and their completion waited
             //   upon. However, these changes are not reflected until `finish_sync`.
-            ops::update(
-                staged_changeset.clone(),
+            let changeset = exclusive_changeset.unwrap_or_else(|| {
+                staged_changeset
+                    .unwrap()
+                    .iter()
+                    .map(|(key, value)| (*key, value.clone()))
+                    .collect()
+            });
+            ops::update_values(
+                changeset,
                 bbn_index,
                 leaf_cache,
                 leaf_store,
@@ -365,6 +391,31 @@ impl ValueChange {
             ValueChange::Delete => None,
             ValueChange::Insert(ref v) | ValueChange::InsertOverflow(ref v, _) => Some(&v[..]),
         }
+    }
+}
+
+/// Stable ordering preserves the last value for duplicate keys.
+#[inline]
+pub(crate) fn sort_value_changes(changeset: &mut [(Key, ValueChange)], cache_keys: bool) {
+    // Stable sorting keeps the final value for repeated keys unchanged.
+    let prefix = |key: &Key| u64::from_be_bytes(key[..8].try_into().unwrap());
+    if cache_keys {
+        // Large, unordered batch merges move compact indices during sorting.
+        changeset.sort_by_cached_key(|(key, _)| prefix(key));
+    } else {
+        changeset.sort_by_key(|(key, _)| prefix(key));
+    }
+    let mut start = 0;
+    while start < changeset.len() {
+        let first = prefix(&changeset[start].0);
+        let mut end = start + 1;
+        while end < changeset.len() && prefix(&changeset[end].0) == first {
+            end += 1;
+        }
+        if end - start > 1 {
+            changeset[start..end].sort_by_key(|(key, _)| *key);
+        }
+        start = end;
     }
 }
 
@@ -438,12 +489,51 @@ impl SyncController {
         &mut self,
         changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
     ) {
+        self.begin_sync_inner(changeset, false);
+    }
+
+    /// Prepare values directly while the enclosing NOMT commit holds exclusive
+    /// access. The caller must retain that exclusion through finalization.
+    pub(crate) fn begin_sync_exclusive(
+        &mut self,
+        changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
+    ) {
+        self.begin_sync_inner(changeset, true);
+    }
+
+    fn begin_sync_inner(
+        &mut self,
+        changeset: impl IntoIterator<Item = (Key, ValueChange)> + Send + 'static,
+        exclusive: bool,
+    ) {
         let inner = self.inner.clone();
         let begin_sync_task = move || {
-            Tree::commit(&inner.shared, changeset);
+            let exclusive_changeset = if exclusive {
+                let mut values: Vec<_> = changeset.into_iter().collect();
+                // Batches and finished sessions may already be ordered. For
+                // unordered overlay maps, cache prefixes once during sorting.
+                if !values.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
+                    sort_value_changes(&mut values, true);
+                }
+                values.dedup_by(|later, earlier| {
+                    if later.0 != earlier.0 {
+                        return false;
+                    }
+                    std::mem::swap(&mut later.1, &mut earlier.1);
+                    true
+                });
+                Some(values)
+            } else {
+                Tree::commit(&inner.shared, changeset);
+                None
+            };
 
-            let (out_meta, out_bbn_index, out_pre_swap_rx) =
-                Tree::prepare_sync(&inner.sync, &inner.shared, &inner.read_transaction_counter)?;
+            let (out_meta, out_bbn_index, out_pre_swap_rx) = Tree::prepare_sync(
+                &inner.sync,
+                &inner.shared,
+                &inner.read_transaction_counter,
+                exclusive_changeset,
+            )?;
 
             let mut sync_data = inner.sync_data.lock();
             *sync_data = Some(out_meta);
@@ -473,8 +563,11 @@ impl SyncController {
     /// This must be called after [`Self::begin_sync`].
     pub fn wait_pre_meta(&mut self) -> std::io::Result<SyncData> {
         join_task(&self.begin_sync_result_rx)?;
-        self.inner.sync.bbn_fsync.wait()?;
-        self.inner.sync.ln_fsync.wait()?;
+        // Both durability tasks have started; join both even when one fails.
+        let bbn_result = self.inner.sync.bbn_fsync.wait();
+        let ln_result = self.inner.sync.ln_fsync.wait();
+        bbn_result?;
+        ln_result?;
 
         // UNWRAP: fsync of bbn and ln above ensures that sync_data is Some.
         let sync_data = self.inner.sync_data.lock().take().unwrap();
@@ -483,13 +576,23 @@ impl SyncController {
 
     /// Finishes sync.
     ///
-    /// Has to be called after the manifest is updated. Must be invoked by the sync
-    /// thread. Blocking.
-    pub fn post_meta(&mut self) {
-        let pre_swap_rx = self.inner.pre_swap_rx.lock().take().unwrap();
-        join_task(&pre_swap_rx);
-        let bbn_index = self.inner.bbn_index.lock().take().unwrap();
-        Tree::finish_sync(&self.inner.shared, bbn_index);
+    /// Has to be called after the manifest is durable. The caller must join the
+    /// returned task before ending the commit, including when HT writeout fails.
+    pub fn post_meta(&mut self) -> Receiver<TaskResult<()>> {
+        let inner = self.inner.clone();
+        let tp = inner.sync.tp.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        spawn_task(
+            &tp,
+            move || {
+                let pre_swap_rx = inner.pre_swap_rx.lock().take().unwrap();
+                join_task(&pre_swap_rx);
+                let bbn_index = inner.bbn_index.lock().take().unwrap();
+                Tree::finish_sync(&inner.shared, bbn_index);
+            },
+            tx,
+        );
+        rx
     }
 }
 

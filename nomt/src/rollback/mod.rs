@@ -43,6 +43,8 @@ mod tests;
 const MAX_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
 struct InMemory {
+    /// Publish the retained range, rather than the pre-pruning range, for a batch.
+    batch_appended: bool,
     /// The log of deltas that we have accumulated so far.
     ///
     /// The items are pushed onto the back and popped from the front. When the log reaches
@@ -70,6 +72,7 @@ impl InMemory {
     fn new() -> Self {
         Self {
             log: VecDeque::new(),
+            batch_appended: false,
             pending_truncate: None,
         }
     }
@@ -173,25 +176,21 @@ impl Rollback {
         Ok(())
     }
 
-    /// Saves the delta into the log, unless the locks are already held by another thread.
-    ///
-    /// If commit is blocked, it returns the delta back to the caller.
-    pub fn commit_nonblocking(&self, delta: Delta) -> anyhow::Result<Option<Delta>> {
-        let delta_bytes = delta.encode();
-
-        // Try to lock the in-memory log and the seglog.
-        let mut in_memory = match self.shared.in_memory.try_lock() {
-            Some(lock) => lock,
-            None => return Ok(Some(delta)), // Another thread is holding the lock.
-        };
-        let mut seglog = match self.shared.seglog.try_lock() {
-            Some(lock) => lock,
-            None => return Ok(Some(delta)), // Another thread is holding the lock.
-        };
-
-        let record_id = seglog.append(&delta_bytes)?;
-        in_memory.push_recent(record_id, delta);
-        Ok(None)
+    /// Preserve logical rollback boundaries while sharing the log durability barrier.
+    pub(crate) fn commit_batch(&self, deltas: Vec<Delta>) -> anyhow::Result<()> {
+        // Intermediate states are never separately acknowledged by a batch.
+        // Deltas older than its retained suffix cannot be requested after commit.
+        let skip = deltas
+            .len()
+            .saturating_sub(self.shared.max_rollback_log_len);
+        let mut in_memory = self.shared.in_memory.lock();
+        let mut seglog = self.shared.seglog.lock();
+        let ids = seglog.append_batch(deltas[skip..].iter(), Delta::encode_into)?;
+        for (id, delta) in ids.into_iter().zip(deltas.into_iter().skip(skip)) {
+            in_memory.push_recent(id, delta);
+        }
+        in_memory.batch_appended = true;
+        Ok(())
     }
 
     /// Truncates the rollback log by removing the last `n` deltas.
@@ -211,30 +210,26 @@ impl Rollback {
         }
 
         let mut traceback = BTreeMap::new();
-        let mut earliest_record_id = None;
         while n > 0 {
             // Pop the most recent delta from the log and add its original values to the traceback,
             // potentially overwriting some of the values that were added in previous iterations.
             //
             // UNWRAP: we checked above that `n` is greater or equal to the total number of deltas
             //         and `n` is strictly decreasing.
-            let (record_id, delta) = in_memory.pop_recent().unwrap();
-            earliest_record_id = Some(record_id);
+            let (_, delta) = in_memory.pop_recent().unwrap();
             for (key, value) in delta.priors {
                 traceback.insert(key, value);
             }
             n -= 1;
         }
-        // UNWRAP: we checked above that `n` is greater than 0 and that means that there is at
-        //         least one delta that we will remove.
-        let earliest_record_id = earliest_record_id.unwrap();
-
-        // We got the earliest record ID that we will remove. To obtain the new live range start
-        // we need to get the ID of the element prior to that, hence `prev`.
-        //
-        // UNWRAP: `prev` returns `None` iff the record ID is nil. We know that `earliest_record_id`
-        //         can't be nil because there were some elements in the log that we removed.
-        let new_end_live = earliest_record_id.prev().unwrap();
+        // Use the last retained record, or an empty range if history is exhausted.
+        // Subtracting one from the removed ID could resurrect an expired record
+        // after reopening, even though it is absent from the in-memory history.
+        let new_end_live = in_memory
+            .log
+            .back()
+            .map(|(id, _)| *id)
+            .unwrap_or_else(RecordId::nil);
 
         // Set pending truncate to the new end live.
         //
@@ -255,6 +250,7 @@ impl Rollback {
         let mut in_memory = self.shared.in_memory.lock();
         let seglog = self.shared.seglog.lock();
 
+        let batch_appended = std::mem::take(&mut in_memory.batch_appended);
         let pending_truncate = in_memory.pending_truncate.take();
 
         // NOTE: for now, if there is a pending truncate, we ignore everything else.
@@ -265,22 +261,43 @@ impl Rollback {
                 rollback_end_live: pending_truncate,
                 prune_to_new_start_live: None,
                 prune_to_new_end_live: Some(pending_truncate),
+                expired_delta: Vec::new(),
             };
         }
 
-        let prune_to_new_start_live = if in_memory.total_len() > self.shared.max_rollback_log_len {
-            Some(in_memory.pop_oldest().unwrap().0.next().0)
-        } else {
-            None
-        };
+        let mut expired_delta = Vec::new();
+        let mut prune_to_new_start_live = None;
+        while in_memory.total_len() > self.shared.max_rollback_log_len {
+            let (id, delta) = in_memory.pop_oldest().expect("excess rollback record");
+            prune_to_new_start_live = Some(id.next().0);
+            expired_delta.push(delta);
+        }
+
+        if in_memory.total_len() == 0 && prune_to_new_start_live.is_some() {
+            // A zero-length retention window expires every record. Publish the
+            // empty range before removing segments, just like a complete rollback.
+            return WriteoutData {
+                rollback_start_live: 0,
+                rollback_end_live: 0,
+                prune_to_new_start_live: None,
+                prune_to_new_end_live: Some(0),
+                expired_delta,
+            };
+        }
 
         let (rollback_start_live, rollback_end_live) = seglog.live_range();
 
         WriteoutData {
-            rollback_start_live: rollback_start_live.0,
+            rollback_start_live: if batch_appended {
+                // Recovery must not resurrect expired intermediate batch records.
+                prune_to_new_start_live.unwrap_or(rollback_start_live.0)
+            } else {
+                rollback_start_live.0
+            },
             rollback_end_live: rollback_end_live.0,
             prune_to_new_start_live,
             prune_to_new_end_live: None,
+            expired_delta,
         }
     }
 
@@ -351,15 +368,21 @@ impl SyncController {
     pub fn post_meta(&mut self) {
         let tp = self.rollback.shared.sync_tp.clone();
         // UNWRAP: `writeout_data` is being set to `Some` in `wait_pre_meta`.
-        let wd = self.writeout_data.as_ref().unwrap();
+        let wd = self.writeout_data.take().unwrap();
         let rollback = self.rollback.clone();
         let prune_to_new_start_live = wd.prune_to_new_start_live;
         let prune_to_new_end_live = wd.prune_to_new_end_live;
+        let expired_delta = wd.expired_delta;
         // UNWRAP: safe because post_meta is called only once.
         let post_meta_result_tx = self.post_meta_result_tx.take().unwrap();
         spawn_task(
             &tp,
-            move || rollback.writeout_end(prune_to_new_start_live, prune_to_new_end_live),
+            move || {
+                let result = rollback.writeout_end(prune_to_new_start_live, prune_to_new_end_live);
+                // The coordinator joins this task before durable commit returns.
+                drop(expired_delta);
+                result
+            },
             post_meta_result_tx,
         );
     }
@@ -371,6 +394,8 @@ impl SyncController {
 }
 
 struct WriteoutData {
+    /// In-memory cleanup overlapped with HT writeout, still joined inside commit.
+    expired_delta: Vec<Delta>,
     rollback_start_live: u64,
     rollback_end_live: u64,
     /// If this is `Some`, then the [`Rollback::writeout_end`] should be called with this value.

@@ -17,7 +17,7 @@ use crate::{
     io::{self, page_pool::FatPage, IoCommand, IoHandle, IoKind, PagePool, PAGE_SIZE},
     page_cache::{Page, PageCache},
     store::{BucketInfo, DirtyPage},
-    task::{join_task, spawn_task, TaskResult},
+    task::{spawn_task, unwrap_task_result, TaskResult},
 };
 
 use self::{ht_file::HTOffsets, meta_map::MetaMap};
@@ -355,8 +355,16 @@ impl SyncController {
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.
+            let has_ht_changes = !ht_pages.is_empty();
             *ht_to_write.lock() = Some(ht_pages);
-            Self::spawn_wal_writeout(pre_meta_result_tx, bitbox);
+            if has_ht_changes {
+                Self::spawn_wal_writeout(pre_meta_result_tx, bitbox);
+            } else {
+                // No hash-table pages need redo. The previous WAL is already
+                // truncated; an older durable copy either replays the unchanged
+                // table or is discarded after the new manifest sequence appears.
+                let _ = pre_meta_result_tx.send(Ok(Ok(())));
+            }
 
             // perform cache updates: insert changes and evict old pages.
             // evict and drop old pages outside of the critical path.
@@ -391,8 +399,12 @@ impl SyncController {
     ///
     /// Must be invoked by the sync thread. Blocking.
     pub fn wait_pre_meta(&self) -> anyhow::Result<()> {
-        join_task(&self.begin_sync_result_rx)?;
-        join_task(&self.pre_meta_result_rx)?;
+        let preparation = self.begin_sync_result_rx.recv().unwrap();
+        // Preparation may panic after spawning WAL writeout. If it stopped
+        // earlier, its sender was dropped and this receive returns immediately.
+        let wal = self.pre_meta_result_rx.recv();
+        unwrap_task_result(preparation)?;
+        unwrap_task_result(wal.expect("successful preparation must report WAL readiness"))?;
         Ok(())
     }
 
@@ -402,6 +414,9 @@ impl SyncController {
     /// thread. Blocking.
     pub fn post_meta(&self, io_handle: IoHandle) -> std::io::Result<()> {
         let ht_pages = self.ht_to_write.lock().take().unwrap();
+        if ht_pages.is_empty() {
+            return Ok(());
+        }
         // Writeout the HT pages and truncate the WAL file.
         //
         // Why don't we fsync the truncation of the WAL file? Because it should not be necessary.
@@ -438,16 +453,18 @@ fn recover(
 
     wal_fd.seek(SeekFrom::Start(0))?;
 
-    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
-
     // This condition triggers either if:
     //   1. the WAL holds data for a sync that never concluded. Safe to discard.
     //   2. the WAL holds data for a sync that fully concluded. (somehow). Safe to discard.
-    if wal_reader.sync_seqn() != sync_seqn {
+    if WalBlobReader::read_sync_seqn(page_pool, wal_fd)? != sync_seqn {
         // fsync generously here since it's a one-time operation.
         writeout::truncate_wal(wal_fd, true)?;
         return Ok(());
     }
+
+    // Validate the complete body only when this manifest requires its redo.
+    let mut wal_reader = WalBlobReader::new(page_pool, wal_fd)?;
+    debug_assert_eq!(wal_reader.sync_seqn(), sync_seqn);
 
     // The indices of pages (in the metabits page space) that were changed and require updates.
     // Note those are not ht page numbers yet and still require additional conversion.

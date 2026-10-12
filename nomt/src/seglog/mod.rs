@@ -180,6 +180,28 @@ impl SegmentedLog {
     ///
     /// After this function returned, the data is guaranteed to be persisted.
     pub fn append(&mut self, data: &[u8]) -> Result<RecordId> {
+        self.append_inner(data, true)
+    }
+
+    /// Append separate records and persist all touched segments before returning.
+    pub(crate) fn append_batch<T>(
+        &mut self,
+        records: impl ExactSizeIterator<Item = T>,
+        mut encode: impl FnMut(T, &mut Vec<u8>),
+    ) -> Result<Vec<RecordId>> {
+        let mut ids = Vec::with_capacity(records.len());
+        let mut buffer = Vec::new();
+        for record in records {
+            encode(record, &mut buffer);
+            ids.push(self.append_inner(&buffer, false)?);
+        }
+        if !ids.is_empty() {
+            self.head_segment_writer.as_mut().unwrap().fsync()?;
+        }
+        Ok(ids)
+    }
+
+    fn append_inner(&mut self, data: &[u8], durable: bool) -> Result<RecordId> {
         if data.len() > MAX_RECORD_PAYLOAD_SIZE as usize {
             return Err(anyhow::anyhow!(
                 "Record payload size is too large: {}",
@@ -196,6 +218,10 @@ impl SegmentedLog {
                 true
             }
             Some(ref w) if w.file_size() >= self.max_segment_size => {
+                // A batch may have unsynced records in the segment being closed.
+                if !durable {
+                    self.head_segment_writer.as_mut().unwrap().fsync()?;
+                }
                 self.create_segment(record_id)?;
                 true
             }
@@ -209,7 +235,9 @@ impl SegmentedLog {
         // Write the record to the segment file, fsync and update the segment metadata.
         writer.write_header(data.len() as u32, record_id)?;
         writer.write_payload(data)?;
-        writer.fsync()?;
+        if durable {
+            writer.fsync()?;
+        }
 
         // Once the write succeeded, update the live range.
         self.end_live = record_id;
@@ -409,6 +437,7 @@ struct Recovery {
     start_live: RecordId,
     end_live: RecordId,
     payload_buf: Vec<u8>,
+    last_live_record: Option<RecordId>,
     live_segment_start: Option<usize>,
     live_segment_end: Option<usize>,
 }
@@ -420,6 +449,7 @@ impl Recovery {
             start_live,
             end_live,
             payload_buf: Vec::new(),
+            last_live_record: None,
             live_segment_start: None,
             live_segment_end: None,
         }
@@ -451,23 +481,12 @@ impl Recovery {
         }
 
         // Now do some checks.
-        for i in 0..self.candidates.len() {
-            let candidate = &self.candidates[i];
+        for candidate in &self.candidates {
             if candidate.id == 0 {
                 return Err(anyhow::anyhow!(
                     "Segment ID is nil, file: {}",
                     candidate.path.display()
                 ));
-            }
-            if i > 0 {
-                let prev = &self.candidates[i - 1];
-                if prev.id != candidate.id - 1 {
-                    return Err(anyhow::anyhow!(
-                        "Gap in segment IDs: this {}, last {}",
-                        candidate.id,
-                        prev.id
-                    ));
-                }
             }
         }
 
@@ -507,6 +526,18 @@ impl Recovery {
             let (was_live, became_live, became_nonlive) = self.on_next_record(index, record_id);
 
             if was_live || became_live || became_nonlive {
+                // Required records must be contiguous across segment boundaries,
+                // including the manifest's first live record.
+                let expected = self
+                    .last_live_record
+                    .map_or(self.start_live, |record| record.next());
+                ensure!(
+                    record_id == expected,
+                    "Live record IDs are not ordered: this {}, expected {}",
+                    record_id,
+                    expected,
+                );
+                self.last_live_record = Some(record_id);
                 seg_reader.read_payload(&mut self.payload_buf)?;
                 process_record(record_id, &self.payload_buf)?;
             } else {
@@ -521,6 +552,11 @@ impl Recovery {
                 max = Some(record_id);
             }
             last = Some(record_id);
+            // A crash may leave an incomplete header or payload after the
+            // manifest's final committed record. Do not parse that suffix.
+            if record_id == self.end_live {
+                break;
+            }
         }
         // If the segment is empty, we set the min and max to nil. They are always Some after this
         // function returns.
@@ -690,6 +726,19 @@ where
     recovery.scan_root_dir(&root_dir_path, &filename_prefix)?;
     if !empty_live_range {
         for i in 0..recovery.candidates.len() {
+            // Later, uncommitted segments may have been partially removed by
+            // interrupted recovery. Check gaps only until live history is found.
+            if i > 0 {
+                let candidate = &recovery.candidates[i];
+                let prev = &recovery.candidates[i - 1];
+                if prev.id != candidate.id - 1 {
+                    return Err(anyhow::anyhow!(
+                        "Gap in segment IDs: this {}, last {}",
+                        candidate.id,
+                        prev.id
+                    ));
+                }
+            }
             recovery
                 .scan_segment(i, &mut process_record)
                 .with_context(|| {
@@ -698,6 +747,9 @@ where
                         recovery.candidates[i].path.display()
                     )
                 })?;
+            if recovery.candidates[i].max == end_live {
+                break;
+            }
         }
     }
 

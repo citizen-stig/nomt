@@ -46,6 +46,33 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
     changeset: OrdMap<Key, ValueChange>,
+    bbn_index: Index,
+    leaf_cache: LeafCache,
+    leaf_store: Store,
+    bbn_store: Store,
+    page_pool: PagePool,
+    io_handle: IoHandle,
+    thread_pool: ThreadPool,
+    workers: usize,
+) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
+    update_values(
+        changeset
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect(),
+        bbn_index,
+        leaf_cache,
+        leaf_store,
+        bbn_store,
+        page_pool,
+        io_handle,
+        thread_pool,
+        workers,
+    )
+}
+
+pub(crate) fn update_values(
+    changeset: Vec<(Key, ValueChange)>,
     mut bbn_index: Index,
     leaf_cache: LeafCache,
     leaf_store: Store,
@@ -59,7 +86,7 @@ pub fn update(
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 
-    let leaf_stage_outputs = leaf_stage::run(
+    let leaf_stage_outputs = leaf_stage::run_values(
         &bbn_index,
         leaf_cache.clone(),
         leaf_reader,
@@ -93,16 +120,18 @@ pub fn update(
     crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages);
     crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages);
 
-    // make sure that all write requests succeeded.
+    // Drain every submitted request, including when an earlier write failed.
+    // Each command owns its buffer; preserve the first error.
+    let mut write_result = Ok(());
     for _ in 0..total_io {
         // UNWRAP: we receive only what we sent. No `RecvErr` expected.
-        io_handle.recv().unwrap().result?;
+        write_result = write_result.and(io_handle.recv().unwrap().result);
     }
+    write_result?;
 
     let (tx, rx) = crossbeam_channel::bounded(1);
     let post_io_task = move || {
         leaf_stage_outputs.post_io_work.run(&leaf_cache);
-        drop(branch_stage_outputs.post_io_drop);
         leaf_cache.evict();
     };
     spawn_task(&thread_pool, post_io_task, tx);
@@ -138,9 +167,6 @@ pub struct NodesTracker<Node> {
     pub pending_base: Option<(Key, Arc<Node>, Option<Key>)>,
     /// Page numbers which were allocated and discarded entirely during this update.
     pub extra_freed: Vec<PageNumber>,
-    /// Pages which are potentially being written and which must be kept alive until I/O
-    /// is guaranteed complete.
-    pub deferred_drop_pages: Vec<Arc<Node>>,
     pub new_inserted: usize,
 }
 
@@ -152,7 +178,6 @@ impl<Node> NodesTracker<Node> {
             pending_base: None,
             extra_freed: Vec::new(),
             new_inserted: 0,
-            deferred_drop_pages: Vec::new(),
         }
     }
 
@@ -201,7 +226,6 @@ impl<Node> NodesTracker<Node> {
         pn: PageNumber,
     ) {
         self.extra_freed.push(pn);
-        self.deferred_drop_pages.push(node.clone());
         self.pending_base = Some((separator, node, cutoff));
     }
 }

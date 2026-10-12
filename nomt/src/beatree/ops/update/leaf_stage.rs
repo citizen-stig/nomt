@@ -23,7 +23,7 @@ use crate::beatree::{
     Key, ValueChange,
 };
 use crate::io::{IoCommand, IoHandle, IoKind};
-use crate::task::{join_task, spawn_task};
+use crate::task::{join_task_result, spawn_task};
 
 /// Tracker of all changes that happen to leaves during an update
 pub type LeavesTracker = super::NodesTracker<LeafNode>;
@@ -89,6 +89,31 @@ pub fn run(
     thread_pool: ThreadPool,
     num_workers: usize,
 ) -> std::io::Result<LeafStageOutput> {
+    run_values(
+        bbn_index,
+        leaf_cache,
+        leaf_reader,
+        leaf_writer,
+        io_handle,
+        changeset
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect(),
+        thread_pool,
+        num_workers,
+    )
+}
+
+pub(super) fn run_values(
+    bbn_index: &Index,
+    leaf_cache: LeafCache,
+    leaf_reader: StoreReader,
+    leaf_writer: SyncAllocator,
+    io_handle: IoHandle,
+    changeset: Vec<(Key, ValueChange)>,
+    thread_pool: ThreadPool,
+    num_workers: usize,
+) -> std::io::Result<LeafStageOutput> {
     if changeset.is_empty() {
         return Ok(LeafStageOutput::default());
     }
@@ -97,18 +122,18 @@ pub fn run(
     let page_pool = leaf_reader.page_pool().clone();
 
     let changeset = changeset
-        .iter()
+        .into_iter()
         .map(|(k, v)| match v {
-            ValueChange::Insert(v) => Ok((*k, Some((v.clone(), false)))),
+            ValueChange::Insert(v) => Ok((k, Some((v, false)))),
             ValueChange::InsertOverflow(large_value, value_hash) => {
                 let (pages, num_writes) =
                     overflow::chunk(&large_value, &leaf_writer, &page_pool, &io_handle)?;
                 overflow_io += num_writes;
 
                 let cell = overflow::encode_cell(large_value.len(), value_hash.clone(), &pages);
-                Ok((*k, Some((cell, true))))
+                Ok((k, Some((cell, true))))
             }
-            ValueChange::Delete => Ok((*k, None)),
+            ValueChange::Delete => Ok((k, None)),
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
@@ -171,9 +196,9 @@ pub fn run(
     let mut output = LeafStageOutput::default();
     output.submitted_io += overflow_io;
 
-    for _ in 0..num_workers {
-        let worker_output = join_task(&worker_result_rx)?;
-        apply_worker_changes(&leaf_reader, &mut output, worker_output);
+    for completed in 0..num_workers {
+        let worker_output = join_task_result(&worker_result_rx, num_workers - completed - 1)?;
+        apply_worker_changes(&mut output, worker_output);
     }
 
     filter_leaves_changeset(&mut output.leaf_changeset);
@@ -181,14 +206,8 @@ pub fn run(
     Ok(output)
 }
 
-fn apply_worker_changes(
-    leaf_reader: &StoreReader,
-    output: &mut LeafStageOutput,
-    mut worker_output: LeafWorkerOutput,
-) {
-    for deleted_overflow_cell in worker_output.overflow_deleted.drain(..) {
-        overflow::delete(&deleted_overflow_cell, leaf_reader, &mut output.freed_pages);
-    }
+fn apply_worker_changes(output: &mut LeafStageOutput, mut worker_output: LeafWorkerOutput) {
+    output.freed_pages.append(&mut worker_output.overflow_freed);
 
     for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
         // Discard entries that have both insert and delete equal to None.
@@ -547,7 +566,7 @@ fn reset_leaf_base_fresh(
 
 struct LeafWorkerOutput {
     leaves_tracker: LeavesTracker,
-    overflow_deleted: Vec<Vec<u8>>,
+    overflow_freed: Vec<PageNumber>,
 }
 
 fn run_worker(
@@ -690,9 +709,17 @@ fn run_worker(
         }
     }
 
+    // Release completed range links before reclaiming overflow pages so the
+    // neighboring workers can finish their own reads concurrently.
+    drop(worker_params);
+    let mut overflow_freed = Vec::new();
+    for cell in overflow_deleted {
+        overflow::delete(&cell, &leaf_reader, &mut overflow_freed);
+    }
+
     Ok(LeafWorkerOutput {
         leaves_tracker: new_leaf_state.leaves_tracker,
-        overflow_deleted,
+        overflow_freed,
     })
 }
 
@@ -714,10 +741,9 @@ impl super::leaf_updater::HandleNewLeaf for NewLeafHandler {
 
         let page_number = self.leaf_writer.allocate()?;
 
-        let page = leaf.inner.page();
         self.io_handle
             .send(IoCommand {
-                kind: IoKind::WriteRaw(fd, page_number.0 as u64, page),
+                kind: IoKind::WriteShared(fd, page_number.0 as u64, leaf.clone()),
                 user_data: 0,
             })
             .expect("I/O Pool Down");
