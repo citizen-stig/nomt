@@ -124,13 +124,15 @@ impl KeyReadWrite {
         }
     }
 
-    fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
+    /// Moves the read value out (leaving `None`), so the merkle update can recognize the key's own
+    /// leaf without fetching it. Written values stay in place.
+    fn to_compact<T: HashAlgorithm>(&mut self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(mem::take(read)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
+            KeyReadWrite::ReadThenWrite(read, val) => {
+                crate::merkle::KeyReadWrite::ReadThenWrite(mem::take(read), val.as_ref().map(hash))
             }
         }
     }
@@ -585,8 +587,9 @@ impl<T: HashAlgorithm> Session<T> {
             .take()
             .map(|delta_builder| delta_builder.finalize(&actuals));
 
+        let mut actuals = actuals;
         let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
+        for (path, read_write) in &mut actuals {
             compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
         }
 
