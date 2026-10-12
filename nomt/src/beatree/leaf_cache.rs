@@ -44,6 +44,11 @@ impl LeafCache {
     }
 
     /// Insert a cache entry. This does not evict anything.
+    /// The maximum number of leaves the cache holds.
+    pub fn capacity(&self) -> usize {
+        self.inner.shards.iter().map(|shard| shard.lock().max_items).sum()
+    }
+
     pub fn insert(&self, page_number: PageNumber, node: Arc<LeafNode>) {
         let mut shard = self.inner.shard_for(page_number);
 
