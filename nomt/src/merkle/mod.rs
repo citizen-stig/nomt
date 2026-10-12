@@ -142,13 +142,13 @@ pub enum BucketInfo {
 /// Whether a key was read or written.
 #[derive(Debug, Clone)]
 pub enum KeyReadWrite {
-    /// The key was read. Contains the read value or `None` if absent.
-    Read(Option<crate::Value>),
+    /// The key was read. Contains the read value hash or `None` if absent.
+    Read(Option<ValueHash>),
     /// The key was written. Contains the written value or `None` if deleted.
     Write(Option<ValueHash>),
-    /// The key was both read and written. Contains the read value (or `None` if absent) and the
-    /// written value hash (or `None` if deleted).
-    ReadThenWrite(Option<crate::Value>, Option<ValueHash>),
+    /// The key was both read and written. Contains the read value hash (or `None` if absent) and
+    /// the written value hash (or `None` if deleted).
+    ReadThenWrite(Option<ValueHash>, Option<ValueHash>),
 }
 
 impl KeyReadWrite {
@@ -166,10 +166,10 @@ impl KeyReadWrite {
         }
     }
 
-    /// The value the key was read with, if it was read and present.
-    fn read_value(&self) -> Option<&crate::Value> {
+    /// The hash of the value the key was read with, if it was read and present.
+    fn read_value_hash(&self) -> Option<ValueHash> {
         match self {
-            KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) => v.as_ref(),
+            KeyReadWrite::Read(v) | KeyReadWrite::ReadThenWrite(v, _) => *v,
             KeyReadWrite::Write(_) => None,
         }
     }

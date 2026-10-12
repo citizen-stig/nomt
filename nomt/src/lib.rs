@@ -124,16 +124,17 @@ impl KeyReadWrite {
         }
     }
 
-    /// Moves the read value out (leaving `None`), so the merkle update can recognize the key's own
-    /// leaf without fetching it. Written values stay in place.
-    fn to_compact<T: HashAlgorithm>(&mut self) -> crate::merkle::KeyReadWrite {
+    /// Hashes the values. The read value hash lets the merkle update recognize the key's own leaf
+    /// without fetching it.
+    fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(mem::take(read)),
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(read.as_ref().map(hash)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(read, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(mem::take(read), val.as_ref().map(hash))
-            }
+            KeyReadWrite::ReadThenWrite(read, val) => crate::merkle::KeyReadWrite::ReadThenWrite(
+                read.as_ref().map(hash),
+                val.as_ref().map(hash),
+            ),
         }
     }
 }
@@ -582,20 +583,17 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
+        let compact_actuals = compact_actuals::<T>(&actuals);
+        let merkle_update_handle = self
+            .merkle_updater
+            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
+
+        // Built while the merkle update runs: both only read the store, which is not modified
+        // until the finished session is committed.
         let rollback_delta = self
             .rollback_delta
             .take()
             .map(|delta_builder| delta_builder.finalize(&actuals));
-
-        let mut actuals = actuals;
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &mut actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
-        let merkle_update_handle = self
-            .merkle_updater
-            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
@@ -614,6 +612,34 @@ impl<T: HashAlgorithm> Session<T> {
             take_global_guard: self.access_guard.is_some(),
         })
     }
+}
+
+/// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
+fn compact_actuals<T: HashAlgorithm>(
+    actuals: &[(KeyPath, KeyReadWrite)],
+) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
+    const MIN_CHUNK: usize = 2048;
+    let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
+        chunk
+            .iter()
+            .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
+            .collect::<Vec<_>>()
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    let chunk = actuals.len().div_ceil(threads).max(MIN_CHUNK);
+    if actuals.len() <= chunk {
+        return compact(actuals);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = actuals
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(move || compact(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("compacting thread panicked"))
+            .collect()
+    })
 }
 
 /// A finished session.

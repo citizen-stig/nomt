@@ -511,7 +511,7 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                     }
                 } else {
                     let (key, read_write) = &self.shared.read_write[next_push];
-                    seeker.push(*key, read_write.read_value().map(|v| H::hash_value(v)));
+                    seeker.push(*key, read_write.read_value_hash());
                     seeker.submit_all(page_set);
                 }
             }
