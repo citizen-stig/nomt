@@ -173,7 +173,7 @@ pub fn run(
 
     for completed in 0..num_workers {
         let worker_output = join_task_result(&worker_result_rx, num_workers - completed - 1)?;
-        apply_worker_changes(&leaf_reader, &mut output, worker_output);
+        apply_worker_changes(&mut output, worker_output);
     }
 
     filter_leaves_changeset(&mut output.leaf_changeset);
@@ -181,14 +181,8 @@ pub fn run(
     Ok(output)
 }
 
-fn apply_worker_changes(
-    leaf_reader: &StoreReader,
-    output: &mut LeafStageOutput,
-    mut worker_output: LeafWorkerOutput,
-) {
-    for deleted_overflow_cell in worker_output.overflow_deleted.drain(..) {
-        overflow::delete(&deleted_overflow_cell, leaf_reader, &mut output.freed_pages);
-    }
+fn apply_worker_changes(output: &mut LeafStageOutput, mut worker_output: LeafWorkerOutput) {
+    output.freed_pages.append(&mut worker_output.overflow_freed);
 
     for (key, leaf_entry) in &worker_output.leaves_tracker.inner {
         // Discard entries that have both insert and delete equal to None.
@@ -547,7 +541,7 @@ fn reset_leaf_base_fresh(
 
 struct LeafWorkerOutput {
     leaves_tracker: LeavesTracker,
-    overflow_deleted: Vec<Vec<u8>>,
+    overflow_freed: Vec<PageNumber>,
 }
 
 fn run_worker(
@@ -690,9 +684,17 @@ fn run_worker(
         }
     }
 
+    // Release the neighbor links first, so that neighboring workers are not held up while the
+    // overflow pages are read.
+    drop(worker_params);
+    let mut overflow_freed = Vec::new();
+    for cell in overflow_deleted {
+        overflow::delete(&cell, &leaf_reader, &mut overflow_freed);
+    }
+
     Ok(LeafWorkerOutput {
         leaves_tracker: new_leaf_state.leaves_tracker,
-        overflow_deleted,
+        overflow_freed,
     })
 }
 
