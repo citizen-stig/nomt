@@ -100,9 +100,17 @@ fn run_worker(page_pool: PagePool, command_rx: Receiver<IoPacket>) {
                 // system call would have returned in case of success,
                 // and in case of error completion_event.result() will contain -errno
                 let io_uring_res = completion_event.result();
-                let syscall_result = if io_uring_res >= 0 { io_uring_res } else { -1 };
+                // `get_result` reads `errno` for negative results, but io_uring reports the error
+                // in the completion instead.
+                let io_result = if io_uring_res >= 0 {
+                    command.kind.get_result(io_uring_res as isize)
+                } else if io_uring_res == -libc::EINTR {
+                    IoKindResult::Retry
+                } else {
+                    IoKindResult::Err
+                };
 
-                let result = match command.kind.get_result(syscall_result as isize) {
+                let result = match io_result {
                     IoKindResult::Ok => Ok(()),
                     IoKindResult::Err => Err(std::io::Error::from_raw_os_error(io_uring_res.abs())),
                     IoKindResult::Retry => {
