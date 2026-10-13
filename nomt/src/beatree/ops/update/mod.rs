@@ -55,6 +55,8 @@ pub fn update(
     thread_pool: ThreadPool,
     workers: usize,
 ) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
+    #[cfg(feature = "benchmarks")]
+    let preparation = crate::beatree::update_bench::Preparation::start();
     let leaf_reader = StoreReader::new(leaf_store.clone(), page_pool.clone());
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
@@ -93,10 +95,20 @@ pub fn update(
     crate::beatree::writeout::submit_freelist_write(&io_handle, &leaf_store, ln_freelist_pages);
     crate::beatree::writeout::submit_freelist_write(&io_handle, &bbn_store, bbn_freelist_pages);
 
+    #[cfg(feature = "benchmarks")]
+    let mut measurements = preparation.finish(total_io);
+    #[cfg(feature = "benchmarks")]
+    let write_wait = std::time::Instant::now();
+
     // make sure that all write requests succeeded.
     for _ in 0..total_io {
         // UNWRAP: we receive only what we sent. No `RecvErr` expected.
         io_handle.recv().unwrap().result?;
+    }
+
+    #[cfg(feature = "benchmarks")]
+    {
+        measurements.write_wait = write_wait.elapsed();
     }
 
     let (tx, rx) = crossbeam_channel::bounded(1);
@@ -113,6 +125,8 @@ pub fn update(
             ln_bump: ln_meta.bump,
             bbn_freelist_pn: bbn_meta.freelist_pn,
             bbn_bump: bbn_meta.bump,
+            #[cfg(feature = "benchmarks")]
+            measurements,
         },
         bbn_index,
         rx,

@@ -35,6 +35,10 @@ use leaf_cache::LeafCache;
 #[cfg(feature = "benchmarks")]
 pub mod benches;
 
+/// Standalone value-tree update benchmark and its feature-gated measurements.
+#[cfg(feature = "benchmarks")]
+pub mod update_bench;
+
 #[cfg(feature = "fuzz")]
 pub use ops::bit_ops::*;
 
@@ -374,6 +378,8 @@ pub struct SyncData {
     pub ln_bump: u32,
     pub bbn_freelist_pn: u32,
     pub bbn_bump: u32,
+    #[cfg(feature = "benchmarks")]
+    pub(crate) measurements: update_bench::Measurements,
 }
 
 /// Creates the required files for the beatree.
