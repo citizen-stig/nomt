@@ -15,7 +15,8 @@ use std::{
 use crate::io::{FatPage, IoCommand, IoHandle, IoKind};
 
 pub(super) fn write_wal(mut wal_fd: &File, wal_blob: &[u8]) -> std::io::Result<()> {
-    wal_fd.set_len(0)?;
+    // Recovery and a successful post-meta both leave the WAL empty, and a failed commit poisons
+    // the store, so there is nothing to truncate here.
     wal_fd.seek(SeekFrom::Start(0))?;
     wal_fd.write_all(wal_blob)?;
     wal_fd.sync_all()?;
@@ -61,7 +62,7 @@ pub(super) fn write_ht(
     }
     write_result?;
 
-    ht_fd.sync_all()?;
+    ht_fd.sync_data()?;
 
     Ok(())
 }

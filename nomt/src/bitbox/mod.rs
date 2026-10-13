@@ -355,8 +355,16 @@ impl SyncController {
             drop(wal_blob_builder);
 
             // Set the hash-table pages before spawning WAL writeout so they don't race with it.
+            let has_ht_changes = !ht_pages.is_empty();
             *ht_to_write.lock() = Some(ht_pages);
-            Self::spawn_wal_writeout(pre_meta_result_tx, bitbox);
+            if has_ht_changes {
+                Self::spawn_wal_writeout(pre_meta_result_tx, bitbox);
+            } else {
+                // Nothing to redo. The WAL is empty, or holds a durable copy of an earlier sync
+                // that is either replayed onto the unchanged table or discarded once the new
+                // manifest sequence number is written.
+                let _ = pre_meta_result_tx.send(Ok(Ok(())));
+            }
 
             // perform cache updates: insert changes and evict old pages.
             // evict and drop old pages outside of the critical path.
@@ -406,6 +414,9 @@ impl SyncController {
     /// thread. Blocking.
     pub fn post_meta(&self, io_handle: IoHandle) -> std::io::Result<()> {
         let ht_pages = self.ht_to_write.lock().take().unwrap();
+        if ht_pages.is_empty() {
+            return Ok(());
+        }
         // Writeout the HT pages and truncate the WAL file.
         //
         // Why don't we fsync the truncation of the WAL file? Because it should not be necessary.
