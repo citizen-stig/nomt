@@ -1,4 +1,49 @@
 
+## Update benchmark
+
+Run the standalone value-tree preparation/writeout benchmark from the repository root:
+
+```sh
+cargo bench -p nomt --features benchmarks --bench beatree_update -- --save-baseline before
+# After making a change:
+cargo bench -p nomt --features benchmarks --bench beatree_update -- --baseline before
+```
+
+Criterion stores timing samples under `target/criterion` and reports changes against
+the saved baseline. Add `--test` instead of the baseline arguments for a smoke test.
+Set `TMPDIR` to an existing directory on the target disk for storage measurements;
+the temporary database is removed on exit. The benchmark uses NOMT's file-opening
+policy (direct I/O on Linux except tmpfs or a failed filesystem check). A tmpfs run
+is useful for CPU work but does not represent disk durability latency.
+
+The fixed workload seeds 100,000 random keys using seed `0xBEA72026`, then repeatedly
+overwrites the same 1,000 scattered keys with alternating 256-byte values. It uses
+four update workers, two I/O workers and a 64 MiB leaf cache. Each metric starts with
+a fresh seed and two unmeasured updates to warm the cache and free-page reuse.
+Seeding, changeset construction/staging, and final verification are excluded.
+After each metric, the files are reopened using the returned allocator metadata
+and all changed and untouched values are checked.
+
+| Report | Meaning |
+| --- | --- |
+| `prepare_cpu` | Process CPU consumed during preparation, summed over all threads, including I/O workers running concurrently. This is not elapsed time or isolated worker CPU. |
+| `prepare_wall` | Elapsed update time through submission of the final freelist writes; includes any reads and overlapped write submission. |
+| `write_wait` | Remaining elapsed wait to drain all submitted write completions. |
+| `writes_complete` | Preparation wall time plus completion-drain time; writes have completed but are not yet fsynced. |
+| `durability_wait` | Elapsed time to request both BBN/LN fsyncs concurrently and wait for both. Includes any concurrent post-I/O cleanup. |
+| `total` | Complete standalone update, including durability and remaining cleanup/index publication, excluding changeset staging. |
+| `pages/update`, `bytes/update` | Printed minimum/maximum submitted page writes across the run, including branch, leaf and freelist writes; bytes are pages × 4096, not device-level traffic or file growth. |
+
+Preparation and writes intentionally overlap as they do in the real update path.
+`write_wait` is only the remaining wait, not the entire device write latency.
+Each timing is sampled in a separate run of the same workload, so estimates should
+not be added across reports. Instrumentation is compiled only with `benchmarks`.
+
+This is a warm-cache, fixed-size overwrite regression benchmark; it does not cover
+cold reads, growth, deletion or overflow values. It omits Merkle work, WAL, rollback
+and manifest persistence. Continue to use the full durable-commit benchmark as the
+acceptance check for optimizations; a win here alone is insufficient.
+
 ## Terminology
 
 - btree — B<sup>+</sup>tree
