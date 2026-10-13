@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use imbl::OrdMap;
 use threadpool::ThreadPool;
 
 use crate::beatree::{
@@ -80,31 +79,6 @@ pub struct LeafStageOutput {
 
 /// Change the btree's leaves in the specified way
 pub fn run(
-    bbn_index: &Index,
-    leaf_cache: LeafCache,
-    leaf_reader: StoreReader,
-    leaf_writer: SyncAllocator,
-    io_handle: IoHandle,
-    changeset: OrdMap<Key, ValueChange>,
-    thread_pool: ThreadPool,
-    num_workers: usize,
-) -> std::io::Result<LeafStageOutput> {
-    run_values(
-        bbn_index,
-        leaf_cache,
-        leaf_reader,
-        leaf_writer,
-        io_handle,
-        changeset
-            .iter()
-            .map(|(key, value)| (*key, value.clone()))
-            .collect(),
-        thread_pool,
-        num_workers,
-    )
-}
-
-pub(super) fn run_values(
     bbn_index: &Index,
     leaf_cache: LeafCache,
     leaf_reader: StoreReader,

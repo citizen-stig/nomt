@@ -52,7 +52,7 @@ impl Sync {
 
         bitbox_sync.begin_sync(sync_seqn, page_cache, updated_pages);
         // All Store commits run under NOMT's exclusive access guard.
-        beatree_sync.begin_sync_exclusive(value_tx);
+        beatree_sync.begin_sync(value_tx);
         // Tree preparation may run concurrently with rollback persistence. All must
         // complete successfully before the manifest can reference their new state.
         let mut deltas = rollback_delta.into_iter();

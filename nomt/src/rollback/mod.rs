@@ -43,8 +43,6 @@ mod tests;
 const MAX_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
 struct InMemory {
-    /// Publish the retained range, rather than the pre-pruning range, for a batch.
-    batch_appended: bool,
     /// The log of deltas that we have accumulated so far.
     ///
     /// The items are pushed onto the back and popped from the front. When the log reaches
@@ -72,7 +70,6 @@ impl InMemory {
     fn new() -> Self {
         Self {
             log: VecDeque::new(),
-            batch_appended: false,
             pending_truncate: None,
         }
     }
@@ -189,7 +186,6 @@ impl Rollback {
         for (id, delta) in ids.into_iter().zip(deltas.into_iter().skip(skip)) {
             in_memory.push_recent(id, delta);
         }
-        in_memory.batch_appended = true;
         Ok(())
     }
 
@@ -250,7 +246,6 @@ impl Rollback {
         let mut in_memory = self.shared.in_memory.lock();
         let seglog = self.shared.seglog.lock();
 
-        let batch_appended = std::mem::take(&mut in_memory.batch_appended);
         let pending_truncate = in_memory.pending_truncate.take();
 
         // NOTE: for now, if there is a pending truncate, we ignore everything else.
@@ -288,12 +283,9 @@ impl Rollback {
         let (rollback_start_live, rollback_end_live) = seglog.live_range();
 
         WriteoutData {
-            rollback_start_live: if batch_appended {
-                // Recovery must not resurrect expired intermediate batch records.
-                prune_to_new_start_live.unwrap_or(rollback_start_live.0)
-            } else {
-                rollback_start_live.0
-            },
+            // Publish the start after pruning: `post_meta` deletes the segments that hold only
+            // expired records, so the old start may no longer exist on disk.
+            rollback_start_live: prune_to_new_start_live.unwrap_or(rollback_start_live.0),
             rollback_end_live: rollback_end_live.0,
             prune_to_new_start_live,
             prune_to_new_end_live: None,

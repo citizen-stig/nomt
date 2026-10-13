@@ -70,33 +70,10 @@ impl Overlay {
         self.inner.rollback_delta.as_ref()
     }
 
-    /// Move uniquely owned commit data, preserving data still shared with readers.
-    pub(super) fn take_commit_changes(
-        &mut self,
-    ) -> (
-        HashMap<PageId, DirtyPage>,
-        HashMap<KeyPath, ValueChange>,
-        Option<crate::rollback::Delta>,
-    ) {
-        if let Some(inner) = Arc::get_mut(&mut self.inner) {
-            let delta = inner.rollback_delta.take();
-            if let Some(data) = Arc::get_mut(&mut inner.data) {
-                return (
-                    std::mem::take(&mut data.pages),
-                    std::mem::take(&mut data.values),
-                    delta,
-                );
-            }
-            return (inner.data.pages.clone(), inner.data.values.clone(), delta);
-        }
-        (
-            self.page_changes().clone(),
-            self.value_changes().clone(),
-            self.rollback_delta().cloned(),
-        )
-    }
-
-    /// Called after validation and marking committed under the database write lock.
+    /// Move the changes out of the overlay, cloning only what is still shared.
+    ///
+    /// Must be called after marking the overlay committed: if the data has to be detached, the
+    /// remaining copy is dropped later and must not mark the overlay as dropped.
     pub(super) fn take_committed_changes(
         &mut self,
     ) -> (
@@ -104,17 +81,23 @@ impl Overlay {
         HashMap<KeyPath, ValueChange>,
         Option<crate::rollback::Delta>,
     ) {
-        if let Some(inner) = Arc::get_mut(&mut self.inner) {
-            // make_mut detaches weak references without cloning if no reader owns
-            // the data. Strong readers still receive the original immutable data.
-            let data = Arc::make_mut(&mut inner.data);
-            return (
-                std::mem::take(&mut data.pages),
-                std::mem::take(&mut data.values),
-                inner.rollback_delta.take(),
-            );
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                // Clones only if a live overlay still holds the data. Weak references from
+                // descendants are detached; the data is no longer needed once committed.
+                let data = Arc::make_mut(&mut inner.data);
+                (
+                    std::mem::take(&mut data.pages),
+                    std::mem::take(&mut data.values),
+                    inner.rollback_delta.take(),
+                )
+            }
+            None => (
+                self.page_changes().clone(),
+                self.value_changes().clone(),
+                self.rollback_delta().cloned(),
+            ),
         }
-        self.take_commit_changes()
     }
 
     pub(super) fn marker(&self) -> OverlayMarker {
@@ -129,8 +112,8 @@ impl Overlay {
     }
 }
 
-/// Flatten overlays chronologically on the tree worker. Exclusive staging
-/// performs the stable sort and last-write selection once.
+/// Value changes of consecutive overlays, oldest first. Flattened on the beatree sync worker,
+/// which keeps the last change of each key.
 pub(super) struct BatchValues(pub Vec<HashMap<KeyPath, ValueChange>>);
 
 impl IntoIterator for BatchValues {
@@ -146,8 +129,8 @@ impl IntoIterator for BatchValues {
     }
 }
 
-/// Merge pages on the existing Bitbox worker, overlapping value-tree preparation.
-pub(super) struct BatchPages(pub Vec<HashMap<PageId, DirtyPage>>, pub Vec<Overlay>);
+/// Page changes of consecutive overlays, oldest first. Merged on the bitbox sync worker.
+pub(super) struct BatchPages(pub Vec<HashMap<PageId, DirtyPage>>);
 
 impl IntoIterator for BatchPages {
     type Item = (PageId, DirtyPage);
@@ -191,9 +174,6 @@ impl IntoIterator for BatchPages {
                 }
             }
         }
-        // Release consumed overlay indexes while the value tree is preparing.
-        // This worker is joined before the manifest is published.
-        drop(self.1);
         // Pages created and then removed within the batch never had disk buckets.
         pages.retain(|_, page| !page.diff.cleared() || page.bucket.allocated().is_some());
         pages.into_iter()

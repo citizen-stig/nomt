@@ -57,14 +57,6 @@ impl RecordId {
         RecordId(self.0 + 1)
     }
 
-    pub fn prev(&self) -> Option<RecordId> {
-        if self.0 == 0 {
-            None
-        } else {
-            Some(RecordId(self.0 - 1))
-        }
-    }
-
     fn bytes(&self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
@@ -526,17 +518,17 @@ impl Recovery {
             let (was_live, became_live, became_nonlive) = self.on_next_record(index, record_id);
 
             if was_live || became_live || became_nonlive {
-                // Required records must be contiguous across segment boundaries,
-                // including the manifest's first live record.
-                let expected = self
-                    .last_live_record
-                    .map_or(self.start_live, |record| record.next());
-                ensure!(
-                    record_id == expected,
-                    "Live record IDs are not ordered: this {}, expected {}",
-                    record_id,
-                    expected,
-                );
+                // Live records must be contiguous across segment boundaries. The first one may
+                // follow the manifest's start: older versions published a start whose segment
+                // could already be pruned.
+                if let Some(last) = self.last_live_record {
+                    ensure!(
+                        record_id == last.next(),
+                        "Live record IDs are not ordered: this {}, expected {}",
+                        record_id,
+                        last.next(),
+                    );
+                }
                 self.last_live_record = Some(record_id);
                 seg_reader.read_payload(&mut self.payload_buf)?;
                 process_record(record_id, &self.payload_buf)?;
@@ -1163,6 +1155,26 @@ mod tests {
         h.new_segment(1)?.write()?;
         h.new_segment(2)?.write_record(2, &vec![2u8; 10])?.write()?;
         h.open_log(default_max_segment_size(), 2, 2).unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_start_live_in_pruned_segment() -> Result<()> {
+        // Older versions published the start of the live range before pruning, so the manifest
+        // may point at a record whose segment was already removed.
+        let h = TestHarness::new()?;
+        h.new_segment(2)?
+            .write_record(2, &vec![2u8; 10])?
+            .write_record(3, &vec![3u8; 10])?
+            .write()?;
+        let (_log, records) = h.open_log(default_max_segment_size(), 1, 3)?;
+        assert_eq!(
+            records,
+            vec![
+                (RecordId::from(2), vec![2u8; 10]),
+                (RecordId::from(3), vec![3u8; 10]),
+            ]
+        );
         Ok(())
     }
 

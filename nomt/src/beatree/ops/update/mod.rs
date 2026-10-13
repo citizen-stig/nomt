@@ -1,5 +1,4 @@
 use crossbeam_channel::Receiver;
-use imbl::OrdMap;
 use threadpool::ThreadPool;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -45,33 +44,6 @@ const LEAF_BULK_SPLIT_TARGET: usize = (LEAF_NODE_BODY_SIZE * 3) / 4;
 ///
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
-    changeset: OrdMap<Key, ValueChange>,
-    bbn_index: Index,
-    leaf_cache: LeafCache,
-    leaf_store: Store,
-    bbn_store: Store,
-    page_pool: PagePool,
-    io_handle: IoHandle,
-    thread_pool: ThreadPool,
-    workers: usize,
-) -> std::io::Result<(SyncData, Index, Receiver<TaskResult<()>>)> {
-    update_values(
-        changeset
-            .iter()
-            .map(|(key, value)| (*key, value.clone()))
-            .collect(),
-        bbn_index,
-        leaf_cache,
-        leaf_store,
-        bbn_store,
-        page_pool,
-        io_handle,
-        thread_pool,
-        workers,
-    )
-}
-
-pub(crate) fn update_values(
     changeset: Vec<(Key, ValueChange)>,
     mut bbn_index: Index,
     leaf_cache: LeafCache,
@@ -86,7 +58,7 @@ pub(crate) fn update_values(
     let (leaf_writer, leaf_finisher) = leaf_store.start_sync();
     let (bbn_writer, bbn_finisher) = bbn_store.start_sync();
 
-    let leaf_stage_outputs = leaf_stage::run_values(
+    let leaf_stage_outputs = leaf_stage::run(
         &bbn_index,
         leaf_cache.clone(),
         leaf_reader,

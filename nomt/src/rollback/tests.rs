@@ -306,7 +306,7 @@ fn rollback_writeout_start_and_end() {
 
     // expected prune of oldest delta
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 1);
+    assert_eq!(wa.rollback_start_live, 2);
     assert_eq!(wa.rollback_end_live, 101);
     assert_eq!(wa.prune_to_new_start_live, Some(2));
     assert_eq!(wa.prune_to_new_end_live, None);
@@ -324,7 +324,7 @@ fn rollback_writeout_start_and_end() {
     rollback.commit(delta).unwrap();
 
     let wa = rollback.writeout_start();
-    assert_eq!(wa.rollback_start_live, 2);
+    assert_eq!(wa.rollback_start_live, 3);
     assert_eq!(wa.rollback_end_live, 102);
     assert_eq!(wa.prune_to_new_start_live, Some(3));
     assert_eq!(wa.prune_to_new_end_live, None);

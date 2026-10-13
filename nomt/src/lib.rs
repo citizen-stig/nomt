@@ -796,16 +796,16 @@ impl Overlay {
             deltas.extend(delta);
         }
         {
+            // UNWRAP: the batch has more than one overlay.
+            let last = overlays.last().unwrap();
             let mut shared = nomt.shared.lock();
-            for overlay in &overlays {
-                shared.last_commit_marker = Some(overlay.mark_committed());
-                shared.root = overlay.root();
-            }
+            shared.last_commit_marker = Some(last.marker());
+            shared.root = last.root();
         }
         nomt.store.commit_with_rollback(
             overlay::BatchValues(value_batches),
             nomt.page_cache.clone(),
-            overlay::BatchPages(page_batches, overlays),
+            overlay::BatchPages(page_batches),
             deltas,
         )
     }
@@ -893,7 +893,6 @@ impl Overlay {
 
         Ok(None)
     }
-
 }
 
 /// A marker trait for hash functions usable with NOMT. The type must support both hashing nodes as
