@@ -51,8 +51,11 @@ impl Sync {
             None => (0, 0),
         };
 
-        bitbox_sync.wait_pre_meta()?;
-        let beatree_meta_wd = beatree_sync.wait_pre_meta()?;
+        // Wait for both preparations before propagating an error.
+        let bitbox_result = bitbox_sync.wait_pre_meta();
+        let beatree_result = beatree_sync.wait_pre_meta();
+        bitbox_result?;
+        let beatree_meta_wd = beatree_result?;
 
         if let Some(PanicOnSyncMode::PostWal) = self.panic_on_sync {
             panic!("panic_on_sync is true (post-wal)")
@@ -82,12 +85,14 @@ impl Sync {
             rollback.post_meta();
         }
 
-        bitbox_sync.post_meta(shared.io_pool.make_handle())?;
+        // Finish every cleanup before propagating an error.
+        let bitbox_result = bitbox_sync.post_meta(shared.io_pool.make_handle());
         beatree_sync.post_meta();
-
-        if let Some(ref rollback) = rollback_sync {
-            rollback.wait_post_meta()?;
-        }
+        let rollback_result = rollback_sync
+            .as_ref()
+            .map_or(Ok(()), |rollback| rollback.wait_post_meta());
+        bitbox_result?;
+        rollback_result?;
         Ok(())
     }
 }

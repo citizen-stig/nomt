@@ -51,6 +51,21 @@ struct Shared {
     _db_dir_fd: Arc<File>,
 }
 
+/// Poisons the store unless the commit completes, including when it unwinds.
+struct CommitPoisonGuard<'a> {
+    poisoned: &'a AtomicBool,
+    complete: bool,
+}
+
+impl Drop for CommitPoisonGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.poisoned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 impl Store {
     /// Open the store with the provided `Options`.
     pub fn open(o: &crate::Options, page_pool: PagePool) -> anyhow::Result<Self> {
@@ -289,7 +304,11 @@ impl Store {
             anyhow::bail!("Store is poisoned due to prior error");
         }
 
-        if let Err(e) = sync.sync(
+        let mut poison_guard = CommitPoisonGuard {
+            poisoned: &self.shared.poisoned,
+            complete: false,
+        };
+        sync.sync(
             &self.shared,
             value_tx,
             self.shared.pages.clone(),
@@ -297,12 +316,8 @@ impl Store {
             self.shared.rollback.clone(),
             page_cache,
             updated_pages,
-        ) {
-            self.shared
-                .poisoned
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            return Err(e);
-        }
+        )?;
+        poison_guard.complete = true;
         Ok(())
     }
 }
