@@ -7,6 +7,7 @@ pub struct Options {
     pub(crate) path: PathBuf,
     /// The number of commit workers. Values over 64 will be rounded down to 64.
     pub(crate) commit_concurrency: usize,
+    pub(crate) actuals_concurrency: usize,
     /// The number of io_uring instances, or I/O threads on non-Linux platforms.
     pub(crate) io_workers: usize,
     /// Enable or disable metrics collection.
@@ -29,6 +30,8 @@ pub struct Options {
     /// Whether to prepopulate the upper layers of the page cache on startup.
     /// This incurs some I/O on startup but leads to predictable worst-case performance.
     pub(crate) prepopulate_page_cache: bool,
+    /// Whether to fill the leaf cache with beatree leaves on startup.
+    pub(crate) prepopulate_leaf_cache: bool,
     pub(crate) page_cache_upper_levels: usize,
 }
 
@@ -40,6 +43,7 @@ impl Options {
         Self {
             path: PathBuf::from("nomt_db"),
             commit_concurrency: 1,
+            actuals_concurrency: 16,
             io_workers: 3,
             metrics: false,
             bitbox_num_pages: 64_000,
@@ -52,6 +56,7 @@ impl Options {
             page_cache_size: 256,
             leaf_cache_size: 256,
             prepopulate_page_cache: false,
+            prepopulate_leaf_cache: false,
             page_cache_upper_levels: 2,
         }
     }
@@ -71,6 +76,19 @@ impl Options {
     /// May not be zero.
     pub fn commit_concurrency(&mut self, commit_concurrency: usize) {
         self.commit_concurrency = commit_concurrency;
+    }
+
+    /// Set the maximum number of threads hashing actuals per session.
+    ///
+    /// Limited by available CPU parallelism. Set to 1 to hash sequentially.
+    /// Independent of commit and I/O worker concurrency.
+    ///
+    /// Default: 16.
+    ///
+    /// Panics if `max_threads` is zero.
+    pub fn actuals_concurrency(&mut self, max_threads: usize) {
+        assert!(max_threads > 0);
+        self.actuals_concurrency = max_threads;
     }
 
     /// Set metrics collection on or off.
@@ -168,6 +186,15 @@ impl Options {
     /// Default: false
     pub fn prepopulate_page_cache(&mut self, prepopulate: bool) {
         self.prepopulate_page_cache = prepopulate;
+    }
+
+    /// Sets whether to fill the leaf cache with beatree leaves on startup, up to its capacity.
+    ///
+    /// This reads up to [`Self::leaf_cache_size`] MiB of leaves on startup, so that sessions after
+    /// a restart do not pay for cold leaf reads.
+    /// Default: false
+    pub fn prepopulate_leaf_cache(&mut self, prepopulate: bool) {
+        self.prepopulate_leaf_cache = prepopulate;
     }
 
     /// Sets the number of upper levels of the page tree to keep permanently
