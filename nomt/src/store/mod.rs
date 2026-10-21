@@ -243,6 +243,11 @@ impl Store {
         }
     }
 
+    /// Fill the beatree leaf cache on `threads` threads, up to its capacity.
+    pub fn prepopulate_leaf_cache(&self, threads: usize) {
+        self.shared.values.prepopulate_leaf_cache(threads);
+    }
+
     /// Creates a new [`beatree::ReadTransaction`]. `sync` will be blocked until this is dropped.
     pub fn read_transaction(&self) -> beatree::ReadTransaction {
         self.shared.values.read_transaction()
@@ -278,6 +283,7 @@ impl Store {
         value_tx: impl IntoIterator<Item = (beatree::Key, beatree::ValueChange)> + Send + 'static,
         page_cache: PageCache,
         updated_pages: impl IntoIterator<Item = (PageId, DirtyPage)> + Send + 'static,
+        rollback_delta: Option<crate::rollback::Delta>,
     ) -> anyhow::Result<()> {
         let mut sync = self.sync.lock();
 
@@ -295,6 +301,7 @@ impl Store {
             self.shared.pages.clone(),
             self.shared.values.clone(),
             self.shared.rollback.clone(),
+            rollback_delta,
             page_cache,
             updated_pages,
         ) {

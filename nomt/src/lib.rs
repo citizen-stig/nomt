@@ -124,14 +124,17 @@ impl KeyReadWrite {
         }
     }
 
+    /// Hashes the values. The read value hash lets the merkle update recognize the key's own leaf
+    /// without fetching it.
     fn to_compact<T: HashAlgorithm>(&self) -> crate::merkle::KeyReadWrite {
         let hash = |v: &Value| T::hash_value(v);
         match self {
-            KeyReadWrite::Read(_) => crate::merkle::KeyReadWrite::Read,
+            KeyReadWrite::Read(read) => crate::merkle::KeyReadWrite::Read(read.as_ref().map(hash)),
             KeyReadWrite::Write(val) => crate::merkle::KeyReadWrite::Write(val.as_ref().map(hash)),
-            KeyReadWrite::ReadThenWrite(_, val) => {
-                crate::merkle::KeyReadWrite::ReadThenWrite(val.as_ref().map(hash))
-            }
+            KeyReadWrite::ReadThenWrite(read, val) => crate::merkle::KeyReadWrite::ReadThenWrite(
+                read.as_ref().map(hash),
+                val.as_ref().map(hash),
+            ),
         }
     }
 }
@@ -197,6 +200,7 @@ impl From<[u8; 32]> for Root {
 /// An instance of the Nearly-Optimal Merkle Trie Database.
 pub struct Nomt<T> {
     merkle_update_pool: UpdatePool,
+    actuals_concurrency: usize,
     /// The handle to the page cache.
     page_cache: PageCache,
     page_pool: PagePool,
@@ -234,9 +238,13 @@ impl<T: HashAlgorithm> Nomt<T> {
             let io_handle = store.io_pool().make_handle();
             merkle::prepopulate_cache(io_handle, &page_cache, &store, o.page_cache_upper_levels)?;
         }
+        if o.prepopulate_leaf_cache {
+            store.prepopulate_leaf_cache(o.commit_concurrency);
+        }
 
         Ok(Self {
             merkle_update_pool: UpdatePool::new(o.commit_concurrency, o.warm_up),
+            actuals_concurrency: o.actuals_concurrency,
             page_cache,
             page_pool,
             store,
@@ -328,6 +336,7 @@ impl<T: HashAlgorithm> Nomt<T> {
 
         Session {
             store,
+            actuals_concurrency: self.actuals_concurrency,
             merkle_updater: self.merkle_update_pool.begin::<T>(
                 self.page_cache.clone(),
                 self.page_pool.clone(),
@@ -477,6 +486,7 @@ impl SessionParams {
 /// correctness of replaying the same operations.
 pub struct Session<T> {
     store: Store,
+    actuals_concurrency: usize,
     merkle_updater: Updater,
     metrics: Metrics,
     rollback_delta: Option<rollback::ReverseDeltaBuilder>,
@@ -580,19 +590,17 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
+        let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
+            compact_actuals::<T>(&actuals, self.actuals_concurrency),
+            self.witness_mode.0,
+        )?;
+
+        // Built while the merkle update runs: both only read the store, which is not modified
+        // until the finished session is committed.
         let rollback_delta = self
             .rollback_delta
             .take()
             .map(|delta_builder| delta_builder.finalize(&actuals));
-
-        let mut compact_actuals = Vec::with_capacity(actuals.len());
-        for (path, read_write) in &actuals {
-            compact_actuals.push((path.clone(), read_write.to_compact::<T>()));
-        }
-
-        let merkle_update_handle = self
-            .merkle_updater
-            .update_and_prove::<T>(compact_actuals, self.witness_mode.0)?;
 
         let mut tx = self.store.new_value_tx();
         for (path, read_write) in actuals {
@@ -611,6 +619,52 @@ impl<T: HashAlgorithm> Session<T> {
             take_global_guard: self.access_guard.is_some(),
         })
     }
+}
+
+/// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
+fn compact_actuals<T: HashAlgorithm>(
+    actuals: &[(KeyPath, KeyReadWrite)],
+    max_threads: usize,
+) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
+    const MIN_HASHES_PER_THREAD: usize = 8192;
+    let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
+        chunk
+            .iter()
+            .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
+            .collect::<Vec<_>>()
+    };
+    if max_threads == 1 || actuals.len() < 2 * MIN_HASHES_PER_THREAD {
+        return compact(actuals);
+    }
+    let hashes = actuals
+        .iter()
+        .filter(|(_, read_write)| {
+            matches!(
+                read_write,
+                KeyReadWrite::Write(Some(_)) | KeyReadWrite::ReadThenWrite(_, Some(_))
+            )
+        })
+        .count();
+    let threads = max_threads.min(hashes / MIN_HASHES_PER_THREAD);
+    if threads < 2 {
+        return compact(actuals);
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(threads));
+    if threads == 1 {
+        return compact(actuals);
+    }
+    let chunk = actuals.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = actuals
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(move || compact(chunk)))
+            .collect();
+        let mut output = Vec::with_capacity(actuals.len());
+        for handle in handles {
+            output.extend(handle.join().expect("compacting thread panicked"));
+        }
+        output
+    })
 }
 
 /// A finished session.
@@ -691,18 +745,13 @@ impl FinishedSession {
             shared.last_commit_marker = None;
         }
 
-        if let Some(rollback_delta) = self.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
-
         nomt.store.commit(
             self.value_transaction.into_iter(),
             nomt.page_cache.clone(),
             self.merkle_output
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
+            self.rollback_delta,
         )
     }
 
@@ -714,7 +763,7 @@ impl FinishedSession {
     /// The changeset may be invalidated if another competing session, overlay, or rollback was
     /// committed.
     pub fn try_commit_nonblocking<T: HashAlgorithm>(
-        mut self,
+        self,
         nomt: &Nomt<T>,
     ) -> Result<Option<Self>, anyhow::Error> {
         let write_guard = self
@@ -723,15 +772,6 @@ impl FinishedSession {
             .flatten();
         if write_guard.is_none() {
             return Ok(Some(self));
-        }
-
-        if let Some(rollback_delta) = self.rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            if let Some(delta) = rollback.commit_nonblocking(rollback_delta)? {
-                self.rollback_delta = Some(delta);
-                return Ok(Some(self));
-            }
         }
 
         {
@@ -753,6 +793,7 @@ impl FinishedSession {
             self.merkle_output
                 .updated_pages
                 .into_frozen_iter(/* into_overlay */ false),
+            self.rollback_delta,
         )?;
 
         Ok(None)
@@ -768,29 +809,13 @@ impl Overlay {
     /// overlay has an uncommitted parent. An overlay may be invalidated by a competing commit or
     /// rollback.
     pub fn commit<T: HashAlgorithm>(self, nomt: &Nomt<T>) -> anyhow::Result<()> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
         let _write_guard = nomt.access_lock.write();
-
-        let marker = self.mark_committed();
 
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -798,18 +823,18 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        if let Some(rollback_delta) = rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
-        nomt.store
-            .commit(values, nomt.page_cache.clone(), page_changes)
+        nomt.store.commit(
+            values,
+            nomt.page_cache.clone(),
+            page_changes,
+            rollback_delta,
+        )
     }
 
     /// Commit the changes from this overlay to the underlying database without blocking.
@@ -823,32 +848,16 @@ impl Overlay {
         self,
         nomt: &Nomt<T>,
     ) -> anyhow::Result<Option<Self>> {
-        if !self.parent_matches_marker(nomt.shared.lock().last_commit_marker.as_ref()) {
-            anyhow::bail!("Overlay parent not committed");
-        }
-
-        let root = self.root();
-        let page_changes: Vec<_> = self
-            .page_changes()
-            .into_iter()
-            .map(|(page_id, dirty_page)| (page_id.clone(), dirty_page.clone()))
-            .collect();
-        let values: Vec<_> = self
-            .value_changes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let rollback_delta = self.rollback_delta().map(|delta| delta.clone());
-
         let write_guard = nomt.access_lock.try_write();
         if write_guard.is_none() {
             return Ok(Some(self));
         }
 
-        let marker = self.mark_committed();
-
         {
             let mut shared = nomt.shared.lock();
+            if !self.parent_matches_marker(shared.last_commit_marker.as_ref()) {
+                anyhow::bail!("Overlay parent not committed");
+            }
             if shared.root != self.prev_root() {
                 anyhow::bail!(
                     "Changeset no longer valid (expected previous root {:?}, got {:?})",
@@ -856,18 +865,18 @@ impl Overlay {
                     shared.root
                 );
             }
-            shared.root = root;
-            shared.last_commit_marker = Some(marker);
+            shared.root = self.root();
+            shared.last_commit_marker = Some(self.mark_committed());
         }
 
-        if let Some(rollback_delta) = rollback_delta {
-            // UNWRAP: if rollback_delta is `Some`, then rollback must be also `Some`.
-            let rollback = nomt.store.rollback().unwrap();
-            rollback.commit(rollback_delta)?;
-        }
+        let (page_changes, values, rollback_delta) = self.into_committed_changes();
 
-        nomt.store
-            .commit(values, nomt.page_cache.clone(), page_changes)?;
+        nomt.store.commit(
+            values,
+            nomt.page_cache.clone(),
+            page_changes,
+            rollback_delta,
+        )?;
 
         Ok(None)
     }
@@ -980,6 +989,54 @@ pub fn validate_hashtable(options: &Options) -> anyhow::Result<HashTableUtilizat
 #[cfg(test)]
 mod tests {
     use crate::hasher::Blake3Hasher;
+
+    #[test]
+    fn parallel_compaction_matches_sequential() {
+        use super::{compact_actuals, KeyReadWrite};
+        use crate::merkle::KeyReadWrite as Compact;
+
+        let actuals: Vec<_> = (0u64..131_073)
+            .map(|i| {
+                let mut path = [0; 32];
+                path[..8].copy_from_slice(&i.to_be_bytes());
+                let value = Some(i.to_le_bytes().to_vec());
+                let read_write = match i % 6 {
+                    0 => KeyReadWrite::Read(None),
+                    1 => KeyReadWrite::Read(value),
+                    2 => KeyReadWrite::Write(None),
+                    3 => KeyReadWrite::Write(value),
+                    4 => KeyReadWrite::ReadThenWrite(value, None),
+                    _ => KeyReadWrite::ReadThenWrite(None, value),
+                };
+                (path, read_write)
+            })
+            .collect();
+
+        for len in [0, 1, 16_383, 16_384, 49_151, 49_152, 49_153, 131_073] {
+            let sequential = compact_actuals::<Blake3Hasher>(&actuals[..len], 1);
+            for threads in [2, 16] {
+                let parallel = compact_actuals::<Blake3Hasher>(&actuals[..len], threads);
+                assert_eq!(parallel.len(), sequential.len());
+                for ((path, op), (expected_path, expected_op)) in parallel.iter().zip(&sequential) {
+                    assert_eq!(path, expected_path);
+                    match (op, expected_op) {
+                        (Compact::Read(value), Compact::Read(expected))
+                        | (Compact::Write(value), Compact::Write(expected)) => {
+                            assert_eq!(value, expected);
+                        }
+                        (
+                            Compact::ReadThenWrite(read, value),
+                            Compact::ReadThenWrite(expected_read, expected),
+                        ) => {
+                            assert_eq!(read, expected_read);
+                            assert_eq!(value, expected);
+                        }
+                        _ => panic!("operation changed: {op:?} != {expected_op:?}"),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn session_is_sync() {
