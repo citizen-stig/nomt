@@ -90,7 +90,11 @@ fn dropping_a_session_does_not_panic_the_warm_up() {
     drop(outer);
 
     wait_for_warm_up_threads();
-    assert_eq!(PANICS.load(Ordering::SeqCst), 0, "a warm-up worker panicked");
+    assert_eq!(
+        PANICS.load(Ordering::SeqCst),
+        0,
+        "a warm-up worker panicked"
+    );
 
     // The database still works.
     let session = db.begin_session(SessionParams::default());
