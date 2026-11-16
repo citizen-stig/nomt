@@ -140,6 +140,15 @@ impl KeyReadWrite {
             }
         }
     }
+
+    fn read_value_hash<T: HashAlgorithm>(&self) -> Option<trie::ValueHash> {
+        match self {
+            KeyReadWrite::Read(Some(v)) | KeyReadWrite::ReadThenWrite(Some(v), _) => {
+                Some(T::hash_value(v))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The root of the Merkle Trie.
@@ -640,6 +649,9 @@ impl<T: HashAlgorithm> Session<T> {
         }
         let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
             compact_actuals::<T>(&actuals, self.actuals_concurrency),
+            par_map_actuals(&actuals, self.actuals_concurrency, |(_, read_write)| {
+                read_write.read_value_hash::<T>()
+            }),
             self.witness_mode.0,
         )?;
 
@@ -674,15 +686,21 @@ fn compact_actuals<T: HashAlgorithm>(
     actuals: &[(KeyPath, KeyReadWrite)],
     max_threads: usize,
 ) -> Vec<(KeyPath, crate::merkle::KeyReadWrite)> {
+    par_map_actuals(actuals, max_threads, |(path, read_write)| {
+        (*path, read_write.to_compact::<T>())
+    })
+}
+
+/// Maps `actuals` in order, splitting large inputs across scoped threads.
+fn par_map_actuals<R: Send>(
+    actuals: &[(KeyPath, KeyReadWrite)],
+    max_threads: usize,
+    f: impl Fn(&(KeyPath, KeyReadWrite)) -> R + Sync,
+) -> Vec<R> {
     const MIN_HASHES_PER_THREAD: usize = 8192;
-    let compact = |chunk: &[(KeyPath, KeyReadWrite)]| {
-        chunk
-            .iter()
-            .map(|(path, read_write)| (*path, read_write.to_compact::<T>()))
-            .collect::<Vec<_>>()
-    };
+    let map = |chunk: &[(KeyPath, KeyReadWrite)]| chunk.iter().map(&f).collect::<Vec<_>>();
     if max_threads == 1 || actuals.len() < 2 * MIN_HASHES_PER_THREAD {
-        return compact(actuals);
+        return map(actuals);
     }
     let hashes = actuals
         .iter()
@@ -695,17 +713,17 @@ fn compact_actuals<T: HashAlgorithm>(
         .count();
     let threads = max_threads.min(hashes / MIN_HASHES_PER_THREAD);
     if threads < 2 {
-        return compact(actuals);
+        return map(actuals);
     }
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(threads));
     if threads == 1 {
-        return compact(actuals);
+        return map(actuals);
     }
     let chunk = actuals.len().div_ceil(threads);
     std::thread::scope(|scope| {
         let handles: Vec<_> = actuals
             .chunks(chunk)
-            .map(|chunk| scope.spawn(move || compact(chunk)))
+            .map(|chunk| scope.spawn(|| map(chunk)))
             .collect();
         let mut output = Vec::with_capacity(actuals.len());
         for handle in handles {

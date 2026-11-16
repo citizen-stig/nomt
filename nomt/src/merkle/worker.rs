@@ -173,7 +173,7 @@ fn warm_up_phase<H: HashAlgorithm>(
                     Err(TryRecvError::Disconnected) => break false,
                 };
 
-                seeker.push(warm_up_command.key_path);
+                seeker.push(warm_up_command.key_path, None);
             } else if index == page_idx {
                 seeker.try_recv_page(&mut page_set)?;
             } else {
@@ -513,7 +513,10 @@ impl<H: HashAlgorithm> RangeUpdater<H> {
                         break;
                     }
                 } else {
-                    seeker.push(self.shared.read_write[next_push].0);
+                    seeker.push(
+                        self.shared.read_write[next_push].0,
+                        self.shared.read_values[next_push],
+                    );
                     seeker.submit_all(page_set);
                 }
             }

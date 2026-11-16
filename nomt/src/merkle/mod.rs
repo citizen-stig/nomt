@@ -265,11 +265,14 @@ impl Updater {
     /// Update the trie with the given key-value read/write operations.
     ///
     /// Key-paths should be in sorted order
-    /// and should appear at most once within the vector. Witness specifies whether or not
+    /// and should appear at most once within the vector. `read_values` holds, for each entry, the
+    /// hash of the value the key was read with if it was present; it lets the seek recognize the
+    /// key's own leaf without fetching it. Witness specifies whether or not
     /// to collect the witness of the operation.
     pub fn update_and_prove<H: HashAlgorithm>(
         self,
         read_write: Vec<(KeyPath, KeyReadWrite)>,
+        read_values: Vec<Option<ValueHash>>,
         witness: bool,
     ) -> std::io::Result<UpdateHandle> {
         if let Some(ref warm_up) = self.warm_up {
@@ -279,6 +282,7 @@ impl Updater {
             witness,
             overlay: self.overlay.clone(),
             read_write,
+            read_values,
             root_page_pending: Mutex::new(Vec::with_capacity(64)),
         });
 
@@ -339,7 +343,7 @@ impl Updater {
             true, // collect witness
         );
 
-        seeker.push(key_path);
+        seeker.push(key_path, None);
         let mut page_set = PageSet::new(self.page_pool.clone(), None);
 
         // Blocking I/O loop.
@@ -516,6 +520,8 @@ impl WorkerOutput {
 // Shared data used in committing.
 struct UpdateShared {
     read_write: Vec<(KeyPath, KeyReadWrite)>,
+    // hash of the value each key in `read_write` was read with, if it was present.
+    read_values: Vec<Option<ValueHash>>,
     // nodes needing to be written to pages above a shard.
     root_page_pending: Mutex<Vec<(TriePosition, RootPagePending)>>,
     overlay: LiveOverlay,
