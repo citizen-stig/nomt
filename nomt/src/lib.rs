@@ -659,6 +659,7 @@ impl<T: HashAlgorithm> Session<T> {
         // Built while the merkle update runs: both only read the store, which is not modified
         // until the finished session is committed.
         let mut tx = self.store.new_value_tx();
+        tx.reserve(actuals.len());
         let rollback_delta = match self.rollback_delta.take() {
             Some(delta_builder) => Some(
                 delta_builder

@@ -363,6 +363,11 @@ pub struct ValueTransaction {
 }
 
 impl ValueTransaction {
+    /// Make room for `additional` more writes.
+    pub fn reserve(&mut self, additional: usize) {
+        self.batch.reserve(additional);
+    }
+
     /// Write a value to flat storage.
     pub fn write_value<T: ValueHasher>(&mut self, path: beatree::Key, value: Option<Vec<u8>>) {
         self.batch
