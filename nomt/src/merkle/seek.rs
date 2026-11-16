@@ -383,12 +383,12 @@ impl SeekRequest {
         }
 
         // UNWRAP: The `page_id` from where the leaves request started must be `Some`.
-        let maybe_pages = super::page_walker::reconstruct_pages::<H>(
+        let maybe_pages = super::page_walker::reconstruct_pages_direct::<H>(
             page,
             self.page_id.clone().unwrap(),
             self.position.clone(),
             page_set,
-            final_leaf_data_collection,
+            &final_leaf_data_collection,
         );
 
         if let Some(pages) = maybe_pages {

@@ -74,6 +74,9 @@ pub enum Output {
 /// Pages created as output of the page walker, they could be updated or reconstructed pages.
 enum PageWalkerPageOutput {
     Updated(UpdatedPage),
+    // Only produced in reconstruction mode, which production code replaced with
+    // `reconstruct_pages_direct`; the walker-based path remains for tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     Reconstructed(ReconstructedPage),
 }
 
@@ -90,6 +93,7 @@ pub struct UpdatedPage {
 }
 
 /// A page which was reconstructed by the page walker.
+#[cfg_attr(not(test), allow(dead_code))]
 struct ReconstructedPage {
     /// The ID of the page.
     pub page_id: PageId,
@@ -212,6 +216,7 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Create a new [`PageWalker`] made to reconstruct all elided pages below the specified `parent_page`.
     ///
     /// A [`PageWalker`] created to reconstruct pages can only call [`PageWalker::reconstruct`].
+    #[cfg(test)]
     fn new_reconstructor(root: Node, parent_page: PageId) -> Self {
         Self::new_inner(root, Some(parent_page), true /* reconstruction */)
     }
@@ -523,6 +528,7 @@ impl<H: NodeHasher> PageWalker<H> {
     /// Returns None if the pages that should be reconstructed are already in the `PageSet`.
     ///
     /// Panics if the page walker was not constructed using `new_reconstructor`.
+    #[cfg(test)]
     fn reconstruct(
         mut self,
         page_set: &mut impl PageSet,
@@ -983,6 +989,7 @@ fn count_leaves<H: NodeHasher>(page: &PageMut) -> u64 {
 /// otherwise an iterator over the following items: the reconstructed page, its page_id,
 /// the PageDiff indicating all nodes effectively reconstructed within the page
 /// and a counter of leaves in the page and its subtrees.
+#[cfg(test)]
 pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
     page: &Page,
     page_id: PageId,
@@ -1008,6 +1015,129 @@ pub fn reconstruct_pages<H: nomt_core::hasher::NodeHasher>(
             reconstructed_page.children_leaves_counter,
         )
     }))
+}
+
+/// Like [`reconstruct_pages`], but builds the elided pages directly from the sorted leaves
+/// instead of driving a [`PageWalker`]. The output is the same: every node reachable below
+/// `position` is written and marked changed, leaves are counted per page, and each page records
+/// its child pages as elided.
+pub fn reconstruct_pages_direct<H: NodeHasher>(
+    page: &Page,
+    page_id: PageId,
+    position: TriePosition,
+    page_set: &mut impl PageSet,
+    leaves: &[(KeyPath, ValueHash)],
+) -> Option<Vec<(PageId, Page, PageDiff, u64, u64)>> {
+    let subtree_root = page.node(position.node_index());
+    // UNWRAP: `position` is at the bottom layer of `page_id`, which has child pages.
+    let first_page_id = page_id.child_page_id(position.child_page_index()).unwrap();
+    if page_set.contains(&first_page_id) {
+        return None;
+    }
+
+    let mut builder = DirectReconstruction::<H, _> {
+        page_set,
+        output: Vec::new(),
+        _marker: std::marker::PhantomData,
+    };
+    let (root, _) = builder.child_page(first_page_id, position.depth() as usize, leaves);
+    assert_eq!(root, subtree_root);
+    Some(builder.output)
+}
+
+struct DirectReconstruction<'a, H, P> {
+    page_set: &'a mut P,
+    output: Vec<(PageId, Page, PageDiff, u64, u64)>,
+    _marker: std::marker::PhantomData<H>,
+}
+
+struct WipPage {
+    page_id: PageId,
+    page: PageMut,
+    diff: PageDiff,
+    elided_children: ElidedChildren,
+    leaves: u64,
+    children_leaves: u64,
+}
+
+fn key_bit(key: &KeyPath, bit: usize) -> bool {
+    key[bit / 8] & (0x80 >> (bit % 8)) != 0
+}
+
+impl<'a, H: NodeHasher, P: PageSet> DirectReconstruction<'a, H, P> {
+    // Build the page below the node at `base_depth` (which lies in the parent page) from `leaves`,
+    // which share the first `base_depth` bits and number at least two. Returns that node and the
+    // number of leaves in the new page and its descendants.
+    fn child_page(
+        &mut self,
+        page_id: PageId,
+        base_depth: usize,
+        leaves: &[(KeyPath, ValueHash)],
+    ) -> (Node, u64) {
+        let mut wip = WipPage {
+            page: self.page_set.fresh(&page_id),
+            page_id,
+            diff: PageDiff::default(),
+            elided_children: ElidedChildren::new(),
+            leaves: 0,
+            children_leaves: 0,
+        };
+        let split = leaves.partition_point(|(k, _)| !key_bit(k, base_depth));
+        let left = self.node(&mut wip, base_depth + 1, 0, &leaves[..split]);
+        let right = self.node(&mut wip, base_depth + 1, 1, &leaves[split..]);
+        let root = H::hash_internal(&trie::InternalData { left, right });
+
+        wip.page.set_elided_children(&wip.elided_children);
+        let total = wip.leaves + wip.children_leaves;
+        self.output.push((
+            wip.page_id,
+            wip.page.freeze(),
+            wip.diff,
+            wip.leaves,
+            wip.children_leaves,
+        ));
+        (root, total)
+    }
+
+    // Compute and write the node at `depth`, slot `index` of `wip`, over `leaves`.
+    fn node(
+        &mut self,
+        wip: &mut WipPage,
+        depth: usize,
+        index: usize,
+        leaves: &[(KeyPath, ValueHash)],
+    ) -> Node {
+        let node = match leaves {
+            [] => TERMINATOR,
+            [(key_path, value_hash)] => {
+                wip.leaves += 1;
+                H::hash_leaf(&trie::LeafData {
+                    key_path: *key_path,
+                    value_hash: *value_hash,
+                })
+            }
+            _ if index >= (1 << DEPTH) - 2 => {
+                let child_index = nomt_core::page_id::ChildPageIndex::new((index - 62) as u8)
+                    .expect("bottom layer index");
+                // UNWRAP: a bottom-layer node with two leaves below it never exceeds the page depth.
+                let child_page_id = wip.page_id.child_page_id(child_index.clone()).unwrap();
+                let (node, total) = self.child_page(child_page_id, depth, leaves);
+                debug_assert!(total < PAGE_ELISION_THRESHOLD);
+                wip.elided_children.set_elide(child_index, true);
+                wip.children_leaves += total;
+                node
+            }
+            _ => {
+                let split = leaves.partition_point(|(k, _)| !key_bit(k, depth));
+                let left = self.node(wip, depth + 1, index * 2 + 2, &leaves[..split]);
+                let right = self.node(wip, depth + 1, index * 2 + 3, &leaves[split..]);
+                H::hash_internal(&trie::InternalData { left, right })
+            }
+        };
+        wip.page.set_node(index, node);
+        wip.diff.set_changed(index);
+        node
+    }
 }
 
 #[cfg(test)]
