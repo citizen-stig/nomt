@@ -647,13 +647,14 @@ impl<T: HashAlgorithm> Session<T> {
                 );
             }
         }
-        let merkle_update_handle = self.merkle_updater.update_and_prove::<T>(
-            compact_actuals::<T>(&actuals, self.actuals_concurrency),
-            par_map_actuals(&actuals, self.actuals_concurrency, |(_, read_write)| {
-                read_write.read_value_hash::<T>()
-            }),
-            self.witness_mode.0,
-        )?;
+        let (actuals, compact, read_values) = compact_actuals_pooled::<T>(
+            self.merkle_updater.thread_pool(),
+            actuals,
+            self.actuals_concurrency,
+        );
+        let merkle_update_handle =
+            self.merkle_updater
+                .update_and_prove::<T>(compact, read_values, self.witness_mode.0)?;
 
         // Built while the merkle update runs: both only read the store, which is not modified
         // until the finished session is committed.
@@ -688,6 +689,85 @@ impl<T: HashAlgorithm> Session<T> {
 }
 
 /// Hashes the values of `actuals` for the merkle update, splitting large inputs across scoped threads.
+/// Hashes the written values and read values of `actuals` for the merkle update, on the merkle
+/// worker pool plus the calling thread rather than on freshly spawned threads. Returns `actuals`
+/// along with the results.
+fn compact_actuals_pooled<T: HashAlgorithm>(
+    pool: &threadpool::ThreadPool,
+    actuals: Vec<(KeyPath, KeyReadWrite)>,
+    max_threads: usize,
+) -> (
+    Vec<(KeyPath, KeyReadWrite)>,
+    Vec<(KeyPath, crate::merkle::KeyReadWrite)>,
+    Vec<Option<trie::ValueHash>>,
+) {
+    const MIN_PER_CHUNK: usize = 8192;
+    fn compact_chunk<T: HashAlgorithm>(
+        chunk: &[(KeyPath, KeyReadWrite)],
+    ) -> (
+        Vec<(KeyPath, crate::merkle::KeyReadWrite)>,
+        Vec<Option<trie::ValueHash>>,
+    ) {
+        chunk
+            .iter()
+            .map(|(path, read_write)| {
+                (
+                    (*path, read_write.to_compact::<T>()),
+                    read_write.read_value_hash::<T>(),
+                )
+            })
+            .unzip()
+    }
+
+    let len = actuals.len();
+    let chunks = (pool.max_count() + 1)
+        .min(max_threads)
+        .min(len / MIN_PER_CHUNK)
+        .max(1);
+    if chunks == 1 {
+        let (compact, reads) = compact_chunk::<T>(&actuals);
+        return (actuals, compact, reads);
+    }
+
+    let chunk_len = len.div_ceil(chunks);
+    let actuals = Arc::new(actuals);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for i in 1..chunks {
+        let actuals = actuals.clone();
+        let tx = tx.clone();
+        pool.execute(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let end = ((i + 1) * chunk_len).min(actuals.len());
+                compact_chunk::<T>(&actuals[i * chunk_len..end])
+            }));
+            // Release `actuals` before reporting, so the caller can take it back.
+            drop(actuals);
+            let _ = tx.send((i, res));
+        });
+    }
+    let mut parts = (0..chunks).map(|_| None).collect::<Vec<_>>();
+    parts[0] = Some(compact_chunk::<T>(&actuals[..chunk_len]));
+    for _ in 1..chunks {
+        // UNWRAP: every job sends exactly once.
+        let (i, res) = rx.recv().unwrap();
+        match res {
+            Ok(part) => parts[i] = Some(part),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    let mut compact = Vec::with_capacity(len);
+    let mut reads = Vec::with_capacity(len);
+    for (c, r) in parts.into_iter().flatten() {
+        compact.extend(c);
+        reads.extend(r);
+    }
+    // UNWRAP: every job dropped its handle before reporting.
+    let actuals = Arc::try_unwrap(actuals).ok().unwrap();
+    (actuals, compact, reads)
+}
+
+#[cfg(test)]
 fn compact_actuals<T: HashAlgorithm>(
     actuals: &[(KeyPath, KeyReadWrite)],
     max_threads: usize,
@@ -698,6 +778,7 @@ fn compact_actuals<T: HashAlgorithm>(
 }
 
 /// Maps `actuals` in order, splitting large inputs across scoped threads.
+#[cfg(test)]
 fn par_map_actuals<R: Send>(
     actuals: &[(KeyPath, KeyReadWrite)],
     max_threads: usize,

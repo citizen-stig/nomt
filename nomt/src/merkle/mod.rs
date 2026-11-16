@@ -309,6 +309,11 @@ pub struct Updater {
 }
 
 impl Updater {
+    /// The pool running the update workers.
+    pub fn thread_pool(&self) -> &ThreadPool {
+        &self.worker_tp
+    }
+
     /// Warm up the given key-path by pre-fetching the relevant pages.
     pub fn warm_up(&self, key_path: KeyPath) {
         if let Some(ref warm_up) = self.warm_up {
