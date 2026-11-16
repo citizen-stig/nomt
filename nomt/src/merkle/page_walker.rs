@@ -363,6 +363,16 @@ impl<H: NodeHasher> PageWalker<H> {
         }
     }
 
+    // A page from the page set to modify on the stack. Updates copy it lazily; the walker-based
+    // reconstruction (used by tests only) keeps copying eagerly, as its pages were always built.
+    fn stack_page(&self, page: Page) -> CowPage {
+        if self.reconstruction {
+            CowPage::Owned(page.deep_copy())
+        } else {
+            CowPage::shared(page)
+        }
+    }
+
     #[cfg(test)]
     fn set_inhibit_elision(&mut self) {
         self.inhibit_elision = true;
@@ -567,7 +577,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     // UNWRAP: all pages on the path to the node should be in the cache.
                     page_set
                         .get(&ROOT_PAGE_ID)
-                        .map(|(p, b)| (CowPage::shared(p), b))
+                        .map(|(p, b)| (self.stack_page(p), b))
                         .unwrap()
                 };
 
@@ -606,7 +616,7 @@ impl<H: NodeHasher> PageWalker<H> {
                     let (page, page_origin) = page_set.get(&child_page_id).unwrap();
                     (
                         child_page_id,
-                        CowPage::shared(page),
+                        self.stack_page(page),
                         PageDiff::default(),
                         page_origin,
                     )
@@ -921,7 +931,7 @@ impl<H: NodeHasher> PageWalker<H> {
 
             self.stack.push(StackPage::new::<H>(
                 cur_ancestor.clone(),
-                CowPage::shared(page),
+                self.stack_page(page),
                 PageDiff::default(),
                 page_origin,
             ));
