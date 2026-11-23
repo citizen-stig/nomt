@@ -24,6 +24,8 @@ mod leaf_stage;
 mod leaf_updater;
 
 #[cfg(test)]
+mod audit_branch_logic;
+#[cfg(test)]
 mod tests;
 
 // All nodes less than this body size will be merged with a neighboring node.

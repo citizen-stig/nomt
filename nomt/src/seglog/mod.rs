@@ -1377,3 +1377,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod audit_tests;

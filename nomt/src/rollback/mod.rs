@@ -436,3 +436,6 @@ impl Drop for ReverseDeltaBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod audit_tests;
