@@ -457,6 +457,7 @@ fn is_directory_empty(path: &std::path::Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{Metrics, PagePool, Store};
+    use crate::metrics::MetricsLevel;
 
     #[test]
     fn can_crate_in_empty_dir() {
@@ -466,7 +467,8 @@ mod tests {
         options.path(tempdir.path());
 
         let page_pool = PagePool::new();
-        let store = Store::open(&options, page_pool.clone(), Metrics::new(false)).unwrap();
+        let store =
+            Store::open(&options, page_pool.clone(), Metrics::new(MetricsLevel::Off)).unwrap();
         assert!(!store.is_poisoned());
     }
 }

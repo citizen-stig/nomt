@@ -567,7 +567,7 @@ impl PageLoader {
     /// they are all queued at once and would dominate the mean.
     pub fn start_timed_load(&self, page_id: PageId) -> PageLoad {
         PageLoad {
-            record_fetch_time: self.shared.metrics.is_active(),
+            record_fetch_time: self.shared.metrics.collects(&Metric::PageFetchTime),
             ..self.start_load(page_id)
         }
     }

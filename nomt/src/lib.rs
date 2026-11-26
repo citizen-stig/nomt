@@ -26,6 +26,7 @@ use parking_lot::{ArcRwLockReadGuard, Mutex, RwLock};
 use store::{Store, ValueTransaction};
 
 pub use io::IoUringPermission;
+pub use metrics::MetricsLevel;
 pub use nomt_core::hasher;
 pub use nomt_core::proof;
 pub use nomt_core::trie;
@@ -231,7 +232,7 @@ impl<T: HashAlgorithm> Nomt<T> {
             o.commit_concurrency = MAX_COMMIT_CONCURRENCY;
         }
 
-        let metrics = Metrics::new(o.metrics);
+        let metrics = Metrics::new(o.metrics_level);
 
         let page_pool = PagePool::new();
         let store = Store::open(&o, page_pool.clone(), metrics.clone())?;

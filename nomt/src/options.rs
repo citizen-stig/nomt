@@ -1,3 +1,4 @@
+use crate::metrics::MetricsLevel;
 use std::path::PathBuf;
 
 /// Options when opening a [`crate::Nomt`] instance.
@@ -10,8 +11,8 @@ pub struct Options {
     pub(crate) actuals_concurrency: usize,
     /// The number of io_uring instances, or I/O threads on non-Linux platforms.
     pub(crate) io_workers: usize,
-    /// Enable or disable metrics collection.
-    pub(crate) metrics: bool,
+    /// Which metrics to collect.
+    pub(crate) metrics_level: MetricsLevel,
     pub(crate) bitbox_num_pages: u32,
     pub(crate) bitbox_seed: [u8; 16],
     pub(crate) panic_on_sync: Option<PanicOnSyncMode>,
@@ -43,7 +44,7 @@ impl Options {
             commit_concurrency: 1,
             actuals_concurrency: 16,
             io_workers: 3,
-            metrics: false,
+            metrics_level: MetricsLevel::Off,
             bitbox_num_pages: 64_000,
             bitbox_seed,
             panic_on_sync: None,
@@ -88,11 +89,25 @@ impl Options {
         self.actuals_concurrency = max_threads;
     }
 
-    /// Set metrics collection on or off.
+    /// Set metrics collection on or off: `true` collects all metrics ([`MetricsLevel::Full`]),
+    /// `false` collects none ([`MetricsLevel::Off`]). See [`Self::metrics_level`] for finer
+    /// control.
     ///
     /// Default: off.
     pub fn metrics(&mut self, metrics: bool) {
-        self.metrics = metrics;
+        self.metrics_level = if metrics {
+            MetricsLevel::Full
+        } else {
+            MetricsLevel::Off
+        };
+    }
+
+    /// Set which metrics to collect. [`MetricsLevel::Io`] collects only the metrics updated once
+    /// per disk read, at negligible cost.
+    ///
+    /// Default: [`MetricsLevel::Off`].
+    pub fn metrics_level(&mut self, level: MetricsLevel) {
+        self.metrics_level = level;
     }
 
     /// Set the number of io_uring instances.

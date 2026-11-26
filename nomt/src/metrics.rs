@@ -7,7 +7,9 @@
 //!
 //! What remains is an uncontended atomic add per counter update, and two clock reads per timed
 //! operation (tens of nanoseconds in total). This is negligible next to I/O, but not next to a
-//! value read served from memory: with metrics enabled, such reads are a few percent slower.
+//! value read served from memory: with [`MetricsLevel::Full`], such reads are a few percent
+//! slower. [`MetricsLevel::Io`] only collects metrics updated once per disk read, and does not
+//! time value reads.
 
 use std::{
     sync::{
@@ -17,7 +19,33 @@ use std::{
     time::{Duration, Instant},
 };
 
-const METRICS_NOT_ENABLED: &str = "Metrics are not enabled";
+const METRIC_NOT_COLLECTED: &str = "Metric is not collected at the configured metrics level";
+
+/// Which metrics to collect. Each level collects everything the levels below it collect.
+///
+/// Getters of metrics not collected at the configured level panic; see
+/// `Metrics::metrics_level`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MetricsLevel {
+    /// Collect no metrics.
+    #[default]
+    Off,
+    /// Collect the metrics updated once per disk read: page and leaf cache misses
+    /// (`get_page_cache_misses`, `get_leaf_cache_misses`), reads of the hash-table and leaf files
+    /// (`get_ht_reads`, `get_ln_reads`) and the page fetch time (`get_page_fetch_time`).
+    ///
+    /// Their cost is negligible next to the reads themselves, so this level is meant to stay
+    /// enabled in production. It shows how much disk I/O the database does and how long page
+    /// loads take, but not cache hit ratios or the latency of value reads.
+    Io,
+    /// Collect all metrics. On top of [`MetricsLevel::Io`], this counts every page and leaf cache
+    /// lookup (`get_page_requests`, `get_leaf_cache_requests`) and times every value read
+    /// (`get_value_fetch_time`).
+    ///
+    /// These are updated on paths which do no I/O. Timing value reads makes in-memory reads a
+    /// few percent slower.
+    Full,
+}
 
 /// Metrics collector, if active, it provides Counters and Timers.
 ///
@@ -25,7 +53,9 @@ const METRICS_NOT_ENABLED: &str = "Metrics are not enabled";
 /// See the module documentation.
 #[derive(Clone)]
 pub struct Metrics {
+    /// `None` if the level is [`MetricsLevel::Off`].
     metrics: Option<Arc<ActiveMetrics>>,
+    level: MetricsLevel,
 }
 
 /// Metrics that can be collected during execution
@@ -99,6 +129,21 @@ struct ActiveMetrics {
 }
 
 impl Metric {
+    /// The lowest level at which this metric is collected.
+    #[inline]
+    fn level(&self) -> MetricsLevel {
+        match self {
+            Metric::PageCacheMisses
+            | Metric::LeafCacheMisses
+            | Metric::HtReads
+            | Metric::LnReads
+            | Metric::PageFetchTime => MetricsLevel::Io,
+            Metric::PageRequests | Metric::LeafCacheRequests | Metric::ValueFetchTime => {
+                MetricsLevel::Full
+            }
+        }
+    }
+
     fn counter_slot(&self) -> Slot {
         match self {
             Metric::PageRequests => Slot::PageRequests,
@@ -175,27 +220,51 @@ impl Drop for TimerGuard<'_> {
 }
 
 impl Metrics {
-    /// Returns the Metrics object, active or not based on the specified input
-    pub fn new(active: bool) -> Self {
+    /// Returns a Metrics object collecting the metrics of the given level.
+    pub fn new(level: MetricsLevel) -> Self {
         Self {
-            metrics: active.then(|| Arc::new(ActiveMetrics::new())),
+            metrics: (level > MetricsLevel::Off).then(|| Arc::new(ActiveMetrics::new())),
+            level,
         }
     }
 
-    /// Increase the Counter specified by the input
+    /// The level of metrics being collected.
+    pub fn metrics_level(&self) -> MetricsLevel {
+        self.level
+    }
+
+    /// Whether the given metric is collected at the configured level.
+    #[inline]
+    pub(crate) fn collects(&self, metric: &Metric) -> bool {
+        metric.level() <= self.level
+    }
+
+    /// The active metrics, if the given metric is collected.
+    #[inline]
+    fn collecting(&self, metric: &Metric) -> Option<&ActiveMetrics> {
+        if self.collects(metric) {
+            self.metrics.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Increase the Counter specified by the input, if it is collected at the configured level.
     ///
     /// panics if the specified [`Metric`] is not a Counter
     pub fn count(&self, metric: Metric) {
-        if let Some(ref metrics) = self.metrics {
+        if let Some(metrics) = self.collecting(&metric) {
             metrics.add(metric.counter_slot());
         }
     }
 
-    /// Returns a guard that, when dropped, will record the time passed since creation
+    /// Returns a guard that, when dropped, will record the time passed since creation.
+    /// Returns `None`, without reading the clock, if the timer is not collected at the configured
+    /// level.
     ///
     /// panics if the specified [`Metric`] is not a Timer
     pub fn record<'a>(&'a self, metric: Metric) -> Option<impl Drop + 'a> {
-        self.metrics.as_ref().map(|metrics| TimerGuard {
+        self.collecting(&metric).map(|metrics| TimerGuard {
             metrics,
             slots: metric.timer_slots(),
             start: Instant::now(),
@@ -203,122 +272,129 @@ impl Metrics {
     }
 
     /// Record a duration measured by the caller, for operations which do not fit a scope guard,
-    /// such as asynchronous loads.
+    /// such as asynchronous loads. Ignored if the timer is not collected at the configured level.
     ///
     /// panics if the specified [`Metric`] is not a Timer
     pub fn record_duration(&self, metric: Metric, duration: Duration) {
-        if let Some(ref metrics) = self.metrics {
+        if let Some(metrics) = self.collecting(&metric) {
             metrics.add_duration(metric.timer_slots(), duration);
         }
     }
 
-    /// Whether metrics are being collected.
-    pub fn is_active(&self) -> bool {
-        self.metrics.is_some()
-    }
-
     /// Print collected metrics to stdout
     pub fn print(&self) {
-        if let Some(ref metrics) = self.metrics {
-            println!("metrics");
+        let Some(ref metrics) = self.metrics else {
+            println!("Metrics collection was not activated");
+            return;
+        };
+        let full = self.level >= MetricsLevel::Full;
 
-            let tot_page_requests = metrics.load(Slot::PageRequests);
-            println!("  page requests         {}", tot_page_requests);
+        println!("metrics ({:?})", self.level);
 
-            if tot_page_requests != 0 {
-                let cache_misses = metrics.load(Slot::PageCacheMisses);
-                let percentage_cache_misses =
-                    (cache_misses as f64 / tot_page_requests as f64) * 100.0;
-
+        let page_cache_misses = metrics.load(Slot::PageCacheMisses);
+        if full {
+            let page_requests = metrics.load(Slot::PageRequests);
+            println!("  page requests         {}", page_requests);
+            if page_requests != 0 {
                 println!(
                     "  page cache misses     {} - {:.2}% of page requests",
-                    cache_misses, percentage_cache_misses
+                    page_cache_misses,
+                    (page_cache_misses as f64 / page_requests as f64) * 100.0
                 );
-            }
-
-            let leaf_cache_requests = metrics.load(Slot::LeafCacheRequests);
-            println!("  leaf cache requests   {}", leaf_cache_requests);
-
-            if leaf_cache_requests != 0 {
-                let leaf_cache_misses = metrics.load(Slot::LeafCacheMisses);
-                let percentage_cache_misses =
-                    (leaf_cache_misses as f64 / leaf_cache_requests as f64) * 100.0;
-
-                println!(
-                    "  leaf cache misses     {} - {:.2}% of leaf cache requests",
-                    leaf_cache_misses, percentage_cache_misses
-                );
-            }
-
-            println!("  ht page reads         {}", metrics.load(Slot::HtReads));
-            println!("  ln page reads         {}", metrics.load(Slot::LnReads));
-
-            if let Some(mean) = metrics.mean(Metric::PageFetchTime.timer_slots()) {
-                println!("  page fetch mean       {}", pretty_display_ns(mean));
-            }
-
-            if let Some(mean) = metrics.mean(Metric::ValueFetchTime.timer_slots()) {
-                println!("  value fetch mean      {}", pretty_display_ns(mean));
             }
         } else {
-            println!("Metrics collection was not activated")
+            println!("  page cache misses     {}", page_cache_misses);
+        }
+
+        let leaf_cache_misses = metrics.load(Slot::LeafCacheMisses);
+        if full {
+            let leaf_cache_requests = metrics.load(Slot::LeafCacheRequests);
+            println!("  leaf cache requests   {}", leaf_cache_requests);
+            if leaf_cache_requests != 0 {
+                println!(
+                    "  leaf cache misses     {} - {:.2}% of leaf cache requests",
+                    leaf_cache_misses,
+                    (leaf_cache_misses as f64 / leaf_cache_requests as f64) * 100.0
+                );
+            }
+        } else {
+            println!("  leaf cache misses     {}", leaf_cache_misses);
+        }
+
+        println!("  ht page reads         {}", metrics.load(Slot::HtReads));
+        println!("  ln page reads         {}", metrics.load(Slot::LnReads));
+
+        if let Some(mean) = metrics.mean(Metric::PageFetchTime.timer_slots()) {
+            println!("  page fetch mean       {}", pretty_display_ns(mean));
+        }
+
+        if let Some(mean) = metrics.mean(Metric::ValueFetchTime.timer_slots()) {
+            println!("  value fetch mean      {}", pretty_display_ns(mean));
         }
     }
 
-    fn active(&self) -> &ActiveMetrics {
-        self.metrics.as_deref().expect(METRICS_NOT_ENABLED)
+    /// The active metrics.
+    ///
+    /// Panics if the given metric is not collected at the configured level.
+    fn active(&self, metric: Metric) -> &ActiveMetrics {
+        self.collecting(&metric).expect(METRIC_NOT_COLLECTED)
     }
 
     /// Counter of total page requests.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Full`]. Panics if not collected at the configured level.
     pub fn get_page_requests(&self) -> u64 {
-        self.active().load(Slot::PageRequests)
+        self.active(Metric::PageRequests).load(Slot::PageRequests)
     }
 
     /// Counter of page requests cache misses over all page requests.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Io`]. Panics if not collected at the configured level.
     pub fn get_page_cache_misses(&self) -> u64 {
-        self.active().load(Slot::PageCacheMisses)
+        self.active(Metric::PageCacheMisses)
+            .load(Slot::PageCacheMisses)
     }
 
     /// Counter of beatree leaf cache lookups.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Full`]. Panics if not collected at the configured level.
     pub fn get_leaf_cache_requests(&self) -> u64 {
-        self.active().load(Slot::LeafCacheRequests)
+        self.active(Metric::LeafCacheRequests)
+            .load(Slot::LeafCacheRequests)
     }
 
     /// Counter of beatree leaf cache lookups which missed and had to read the `ln` file.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Io`]. Panics if not collected at the configured level.
     pub fn get_leaf_cache_misses(&self) -> u64 {
-        self.active().load(Slot::LeafCacheMisses)
+        self.active(Metric::LeafCacheMisses)
+            .load(Slot::LeafCacheMisses)
     }
 
     /// Counter of page reads issued to the hash-table (`ht`) file, which stores merkle pages.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Io`]. Panics if not collected at the configured level.
     pub fn get_ht_reads(&self) -> u64 {
-        self.active().load(Slot::HtReads)
+        self.active(Metric::HtReads).load(Slot::HtReads)
     }
 
     /// Counter of page reads issued to the beatree leaf (`ln`) file, which stores leaves and
     /// overflow value pages.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Io`]. Panics if not collected at the configured level.
     pub fn get_ln_reads(&self) -> u64 {
-        self.active().load(Slot::LnReads)
+        self.active(Metric::LnReads).load(Slot::LnReads)
     }
 
     /// Average page fetch time: the time to load a merkle page from the hash-table after a page
     /// cache miss, including all probes. See [`Metric::PageFetchTime`].
     /// Returns None if there were no requests.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Io`]. Panics if not collected at the configured level.
     pub fn get_page_fetch_time(&self) -> Option<u64> {
-        self.active().mean(Metric::PageFetchTime.timer_slots())
+        self.active(Metric::PageFetchTime)
+            .mean(Metric::PageFetchTime.timer_slots())
     }
 
     /// Average value fetch time during reads.
     /// Returns None if there were no requests.
-    /// Panics if metrics are not enabled.
+    /// Collected at [`MetricsLevel::Full`]. Panics if not collected at the configured level.
     pub fn get_value_fetch_time(&self) -> Option<u64> {
-        self.active().mean(Metric::ValueFetchTime.timer_slots())
+        self.active(Metric::ValueFetchTime)
+            .mean(Metric::ValueFetchTime.timer_slots())
     }
 }
 
@@ -339,12 +415,12 @@ fn pretty_display_ns(ns: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metric, Metrics, STRIPES};
+    use super::{Metric, Metrics, MetricsLevel, STRIPES};
     use std::time::Duration;
 
     #[test]
     fn stripes_sum_across_threads() {
-        let metrics = Metrics::new(true);
+        let metrics = Metrics::new(MetricsLevel::Full);
         let threads = STRIPES + 3;
         std::thread::scope(|s| {
             for _ in 0..threads {
@@ -363,5 +439,40 @@ mod tests {
         assert_eq!(metrics.get_leaf_cache_misses(), 0);
         assert_eq!(metrics.get_page_fetch_time(), Some(20));
         assert_eq!(metrics.get_value_fetch_time(), None);
+    }
+
+    #[test]
+    fn io_level_collects_only_io_metrics() {
+        let metrics = Metrics::new(MetricsLevel::Io);
+        assert_eq!(metrics.metrics_level(), MetricsLevel::Io);
+
+        metrics.count(Metric::PageRequests);
+        metrics.count(Metric::PageCacheMisses);
+        metrics.count(Metric::LeafCacheRequests);
+        metrics.count(Metric::LeafCacheMisses);
+        metrics.count(Metric::HtReads);
+        metrics.count(Metric::LnReads);
+        metrics.record_duration(Metric::PageFetchTime, Duration::from_nanos(10));
+        assert!(metrics.record(Metric::ValueFetchTime).is_none());
+
+        assert_eq!(metrics.get_page_cache_misses(), 1);
+        assert_eq!(metrics.get_leaf_cache_misses(), 1);
+        assert_eq!(metrics.get_ht_reads(), 1);
+        assert_eq!(metrics.get_ln_reads(), 1);
+        assert_eq!(metrics.get_page_fetch_time(), Some(10));
+
+        // Full-level metrics are neither collected nor readable.
+        assert!(std::panic::catch_unwind(|| metrics.get_page_requests()).is_err());
+        assert!(std::panic::catch_unwind(|| metrics.get_leaf_cache_requests()).is_err());
+        assert!(std::panic::catch_unwind(|| metrics.get_value_fetch_time()).is_err());
+    }
+
+    #[test]
+    fn off_level_collects_nothing() {
+        let metrics = Metrics::new(MetricsLevel::Off);
+        assert_eq!(metrics.metrics_level(), MetricsLevel::Off);
+        metrics.count(Metric::HtReads);
+        assert!(metrics.record(Metric::ValueFetchTime).is_none());
+        assert!(std::panic::catch_unwind(|| metrics.get_ht_reads()).is_err());
     }
 }

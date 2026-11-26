@@ -2,7 +2,7 @@ use crate::{
     bitbox::BucketIndex,
     io::{page_pool::FatPage, PagePool, PAGE_SIZE},
     merkle::ElidedChildren,
-    metrics::{Metric, Metrics},
+    metrics::{Metric, Metrics, MetricsLevel},
     page_region::PageRegion,
     rw_pass_cell::{Region, RegionContains, RwPassDomain, WritePass},
     Options,
@@ -334,7 +334,7 @@ impl PageCache {
                 shards: make_shards(NUM_CHILDREN, o.page_cache_size),
                 root_page: RwLock::new(root_page_entry),
                 page_rw_pass_domain: domain,
-                metrics: metrics.into().unwrap_or(Metrics::new(false)),
+                metrics: metrics.into().unwrap_or(Metrics::new(MetricsLevel::Off)),
                 fixed_levels: o.page_cache_upper_levels,
             }),
         }
